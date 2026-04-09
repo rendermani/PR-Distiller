@@ -1,6 +1,7 @@
 import os
 import json
-from litellm import completion
+import asyncio
+from litellm import completion, acompletion
 from db.lightrag_manager import LightRAGManager
 
 class LargeLLMExtractor:
@@ -11,7 +12,7 @@ class LargeLLMExtractor:
     """
     def __init__(self, db_manager: LightRAGManager):
         # Allow override via environment variables, default to our local DGX 70B Host
-        self.model = os.environ.get("EXTRACTOR_MODEL", "openai/meta-llama/Meta-Llama-3-70B-Instruct")
+        self.model = os.environ.get("EXTRACTOR_MODEL", "openai/Qwen/Qwen2.5-Coder-32B-Instruct")
         self.api_base = os.environ.get("EXTRACTOR_API_BASE", "http://gx10:8080/v1")
         self.api_key = os.environ.get("EXTRACTOR_API_KEY", "dgx-dummy-key")
         self.db = db_manager
@@ -27,7 +28,7 @@ class LargeLLMExtractor:
             "{'rule_id': 'uuid', 'metadata': {'status': 'active'}, 'content': {'title': '...', 'description': '...', 'enforcement_prompt': '...'}}"
         )
         
-        user_prompt = f\"\"\"
+        user_prompt = f'''
         <REVIEW_DATA>
         {pr_comment}
         </REVIEW_DATA>
@@ -35,7 +36,7 @@ class LargeLLMExtractor:
         <CODE_DIFF>
         {modified_ast_code}
         </CODE_DIFF>
-        \"\"\"
+        '''
         
         try:
             response = completion(
@@ -50,16 +51,64 @@ class LargeLLMExtractor:
             )
             raw_content = response.choices[0].message.content.strip()
             
-            # Remove markdown JSON wrappers if the model leaked them
             if raw_content.startswith("```json"):
                 raw_content = raw_content.replace("```json", "").replace("```", "").strip()
                 
             rule_dict = json.loads(raw_content)
-            
-            # Post-Process: Automatically store the heavy-lifting extraction into the ChromaDB CodeRAG Receiver
             self.db.store_rule(rule_dict)
             return rule_dict
             
         except Exception as e:
             print(f"[Extractor Error]: {e}")
             return None
+
+    async def async_extract_rule(self, pr_comment: str, modified_ast_code: str) -> dict:
+        """
+        Asynchronous variant of the rule extractor to saturate DGX endpoints.
+        """
+        system_prompt = (
+            "You are an expert AI Architect extracting coding rules into strict JSON. "
+            "Your goal is to parse reviewer feedback and isolate what the Copilot did WRONG. "
+            "Output ONLY valid JSON following this schema: "
+            "{'rule_id': 'uuid', 'metadata': {'status': 'active'}, 'content': {'title': '...', 'description': '...', 'enforcement_prompt': '...'}}"
+        )
+        
+        user_prompt = f'''
+        <REVIEW_DATA>
+        {pr_comment}
+        </REVIEW_DATA>
+        
+        <CODE_DIFF>
+        {modified_ast_code}
+        </CODE_DIFF>
+        '''
+
+        try:
+            response = await acompletion(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                api_base=self.api_base,
+                api_key=self.api_key,
+                temperature=0.1
+            )
+            raw_content = response.choices[0].message.content.strip()
+            if raw_content.startswith("```json"):
+                raw_content = raw_content.replace("```json", "").replace("```", "").strip()
+                
+            rule_dict = json.loads(raw_content)
+            self.db.store_rule(rule_dict)
+            return rule_dict
+        except Exception as e:
+            print(f"[Async Extractor Error]: {e}")
+            return None
+
+    async def batch_extract(self, payloads: list) -> list:
+        """
+        Processes a massive payload concurrently to saturate vLLM throughput.
+        """
+        tasks = [self.async_extract_rule(c, a) for (c, a) in payloads]
+        results = await asyncio.gather(*tasks)
+        return [r for r in results if r is not None]
