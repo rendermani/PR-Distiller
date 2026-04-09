@@ -1,0 +1,12 @@
+{
+  "name": "pr-analysis-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "mcp-server",
+    "web-ui"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspaces"
+  }
+}

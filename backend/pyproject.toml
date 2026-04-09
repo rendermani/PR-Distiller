@@ -1,0 +1,19 @@
+[build-system]
+requires = ["flit_core >=3.2,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "agile-rule-extractor-backend"
+version = "0.1.0"
+description = "Backend for PR-Analysis AGILE-RULE-EXTRACTOR"
+dependencies = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+    "pydantic>=2.0.0",
+    "requests",
+    "presidio-analyzer",
+    "presidio-anonymizer",
+    "chromadb",
+    "networkx",
+    "llama-index"
+]
