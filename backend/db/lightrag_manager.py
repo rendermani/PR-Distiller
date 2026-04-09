@@ -24,24 +24,60 @@ class LightRAGManager:
             metadata={"hnsw:space": "cosine"}
         )
 
+    def find_similar_rule(self, document_text: str, distance_threshold: float = 0.20):
+        """
+        Determines mathematically if a new extraction is redundant.
+        Distance threshold ~0.20 strongly implies identical architectural constraints.
+        Returns the (rule_id, previous_text) if found, else None.
+        """
+        results = self.collection.query(
+            query_texts=[document_text],
+            n_results=1,
+            include=['documents', 'distances']
+        )
+        
+        # Guard against empty results natively 
+        if not results.get("distances") or not len(results["distances"][0]):
+            return None, None
+            return None, None, None
+            
+        closest_distance = results["distances"][0][0]
+        if closest_distance < distance_threshold:
+            print(f"[CodeRAG Filter] Caught similar vector locally! Distance: {closest_distance:.3f}")
+            matched_id = results["ids"][0][0]
+            matched_doc = results["documents"][0][0]
+            matched_metadatas = results["metadatas"][0][0] if results.get("metadatas") else {}
+            return matched_id, matched_doc, matched_metadatas
+            
+        return None, None, None
+
     def store_rule(self, rule_json: dict):
         """
         Stores the high-quality rule extracted by the 70B Teacher / Gemini 3.1 Pro.
         """
-        rule_id = rule_json.get("rule_id")
+        rule_id = rule_json.get("rule_id", os.urandom(4).hex())
         content = rule_json.get("content", {})
         description = content.get("description", "")
         enforcement = content.get("enforcement_prompt", "")
+        metadata = rule_json.get("metadata", {})
+        
+        # Pull occurrence_count, defaulting to 1 explicitly
+        occurrences = metadata.get("occurrence_count", 1)
         
         # The searchable vector string combines condition and what was rejected
         document_text = f"Rule: {content.get('title')} - Context: {description}. Enforce: {enforcement}"
         
         self.collection.add(
             documents=[document_text],
-            metadatas=[{"rule_id": rule_id, "status": rule_json.get("metadata", {}).get("status", "active")}],
+            metadatas=[{"rule_id": rule_id, "status": metadata.get("status", "active"), "occurrence_count": occurrences}],
             ids=[rule_id]
         )
         print(f"[*] Stored Rule Vector [{rule_id}] into CodeRAG Receiver.")
+
+    def delete_rule(self, rule_id: str):
+        """Removes an obsolete rule aggressively after Semantic LLM fusing merges it safely."""
+        self.collection.delete(ids=[rule_id])
+        print(f"[*] Purged overlapping Vector [{rule_id}] post-synthesis.")
 
     def get_contextual_rules(self, code_diff: str, top_k: int = 3):
         """
