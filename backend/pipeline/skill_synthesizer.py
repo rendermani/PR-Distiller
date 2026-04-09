@@ -45,7 +45,7 @@ class SkillSynthesizer:
 
         generated_skills = []
         for topic, rules in clusters.items():
-            skill_md = f\"\"\"---
+            skill_md = f'''---
 name: {topic}
 description: Aggregated enterprise constraints ensuring Copilot compliance for {topic}.
 ---
@@ -56,7 +56,7 @@ You must strictly adhere to the following architecture rules aggregated from pre
 Failure to do so will result in enterprise architectural violations.
 
 ## Constraints & Anti-Patterns:
-\"\"\"
+'''
             # Deduplicate semantically similar sentences inline before injecting
             unique_rules = list(set(rules))
             for i, rule in enumerate(unique_rules, 1):
