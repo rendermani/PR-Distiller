@@ -4,7 +4,7 @@ import os
 import sys
 
 sys.path.append(os.path.abspath(os.path.dirname(os.path.dirname(__file__))))
-from scripts.deep_crawler import crawl_human_rejections
+from scripts.deep_crawler import crawl_human_rejections, crawl_pr_reviews, crawl_closed_issues
 from llm.extractor import LargeLLMExtractor
 from db.lightrag_manager import LightRAGManager
 from pipeline.config_manager import ConfigManager
@@ -65,14 +65,39 @@ class JobOrchestrator:
                 self.active_jobs[job_id]["status"] = f"Using dev cache ({info['count']} tuples from {info['updated_at'][:10]})"
                 pr_data = await asyncio.to_thread(dev_cache.load_crawl, repo)
             else:
-                # 1. Incremental crawl — only fetches comments after last cursor
+                # 1a. Crawl inline PR comments
                 pr_data, updated_cursors = await asyncio.to_thread(
                     crawl_human_rejections, [repo], months, set_spider_status, check_cancel, cursors
                 )
-
-                # Persist updated cursors immediately so even cancelled runs save progress
                 current_conf["crawl_cursors"] = updated_cursors
                 self.conf.save_config(current_conf)
+
+                if check_cancel():
+                    self.active_jobs[job_id]["status"] = "Pipeline Aborted via User Interrupt"
+                    self.active_jobs[job_id]["progress"] = -1
+                    return
+
+                # 1b. Crawl top-level PR reviews
+                self.active_jobs[job_id]["status"] = f"Crawling PR reviews for {repo}..."
+                self.active_jobs[job_id]["progress"] = 20
+                review_data, updated_cursors = await asyncio.to_thread(
+                    crawl_pr_reviews, [repo], months, set_spider_status, check_cancel, updated_cursors
+                )
+                current_conf["crawl_cursors"] = updated_cursors
+                self.conf.save_config(current_conf)
+
+                pr_data.extend(review_data)
+
+                # 1c. Crawl closed issues for architectural lessons
+                self.active_jobs[job_id]["status"] = f"Crawling closed issues for {repo}..."
+                self.active_jobs[job_id]["progress"] = 30
+                issue_data, updated_cursors = await asyncio.to_thread(
+                    crawl_closed_issues, [repo], months, set_spider_status, check_cancel, updated_cursors
+                )
+                current_conf["crawl_cursors"] = updated_cursors
+                self.conf.save_config(current_conf)
+
+                pr_data.extend(issue_data)
 
                 # Save to dev cache for future replay
                 if pr_data:
@@ -112,11 +137,16 @@ class JobOrchestrator:
             self.active_jobs[job_id]["progress"] = -1
 
     def trigger_job(self, payload: dict, current_config: dict) -> str:
-        """Kicks off the asynchronous process detached from the current block"""
+        """Kicks off the asynchronous process detached from the current block."""
         job_id = f"job-{int(time.time())}"
-        self.active_jobs[job_id] = {"status": "Initializing Engine...", "progress": 0}
+        trigger_source = payload.get("trigger_source", "manual")
+        self.active_jobs[job_id] = {
+            "status": "Initializing Engine...",
+            "progress": 0,
+            "trigger_source": trigger_source,
+        }
         self.cancel_flags[job_id] = False
-        
+
         # Fire and forget directly into the active FastAPI root thread reliably
         asyncio.create_task(self._execute_distillation(job_id, payload, current_config))
         return job_id
