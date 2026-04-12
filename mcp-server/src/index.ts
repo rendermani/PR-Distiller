@@ -66,6 +66,51 @@ server.tool(
     }
 );
 
+/**
+ * MCP Tool: Report whether a previously served rule was applied or dismissed.
+ *
+ * Call this after showing a constraint to the user so the backend can track
+ * accept/dismiss ratios and auto-promote high-quality rules.
+ */
+server.tool(
+    "report_rule_feedback",
+    "Reports whether a rule suggestion was applied or dismissed by the developer. Call this after presenting a constraint from query_architectural_constraints.",
+    {
+        rule_id: z.string().describe("The rule_id from the matched rule's metadata."),
+        action: z.enum(["applied", "dismissed"]).describe("'applied' if the developer followed the rule, 'dismissed' if they overrode or ignored it.")
+    },
+    async ({ rule_id, action }) => {
+        try {
+            console.error(`[MCP] Recording feedback: rule=${rule_id} action=${action}`);
+
+            const response = await fetch(`${API_URL}/api/rules/${encodeURIComponent(rule_id)}/feedback`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action })
+            });
+
+            if (!response.ok) {
+                const detail = await response.text();
+                throw new Error(`Backend returned ${response.status}: ${detail}`);
+            }
+
+            const data = await response.json();
+            return {
+                content: [{
+                    type: "text",
+                    text: `Feedback recorded: rule '${data.rule_id}' marked as '${data.action}'.`
+                }]
+            };
+        } catch (error: any) {
+            console.error(`[MCP] Feedback recording failed:`, error.message);
+            return {
+                content: [{ type: "text", text: `Error recording feedback: ${error.message}` }],
+                isError: true
+            };
+        }
+    }
+);
+
 // Bind the server natively to Standard IO interfaces (cursor native protocol)
 async function run() {
     console.error("[*] Starting PR-Distiller MCP Server over STDIO...");

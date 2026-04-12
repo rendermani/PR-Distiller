@@ -48,19 +48,36 @@ def _apply_path_scoping(results: dict, file_path: str) -> dict:
     }
 
 
+_EMBEDDING_MODEL_ENV_VAR = "EMBEDDING_MODEL"
+
+
+def _resolve_embedding_function():
+    """Return the configured ChromaDB embedding function.
+
+    When the EMBEDDING_MODEL environment variable is set, uses
+    SentenceTransformerEmbeddingFunction with that model name.
+    When absent, falls back to DefaultEmbeddingFunction (all-MiniLM-L6-v2)
+    for backward compatibility with existing vector stores.
+
+    Backward-compat fallback explicitly approved per issue #8 spec.
+    """
+    model_name = os.environ.get(_EMBEDDING_MODEL_ENV_VAR)
+    if model_name:
+        return embedding_functions.SentenceTransformerEmbeddingFunction(model_name=model_name)
+    return embedding_functions.DefaultEmbeddingFunction()
+
+
 class LightRAGManager:
     """
-    CodeRAG DB Receiver. 
+    CodeRAG DB Receiver.
     Implements the 'No-Training' solution by mapping extracted PR rejection vectors
     so they can be contextually injected into the student models during routing.
     """
     def __init__(self):
-        import os
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         db_path = os.path.join(base_dir, "data", "code_rag_vectors")
-        
-        # We target the robust persistent Client specifically. 
-        self.embed_fn = embedding_functions.DefaultEmbeddingFunction()
+
+        self.embed_fn = _resolve_embedding_function()
         self.client = chromadb.PersistentClient(path=db_path)
         self.collection = self.client.get_or_create_collection(
             name="enterprise_rejections",
@@ -290,6 +307,140 @@ class LightRAGManager:
 
         return results["distances"][0][0] < distance_threshold
 
+    def record_feedback(self, rule_id: str, action: str) -> None:
+        """
+        Records that a rule was either applied or dismissed by the IDE.
+
+        Increments times_served plus the counter for the given action.
+        When a 'needs_review' rule reaches >=5 serves with >70% acceptance rate,
+        it is auto-promoted to 'active'.
+
+        Args:
+            rule_id: The ID of the rule that received feedback.
+            action: Either 'applied' or 'dismissed'.
+
+        Raises:
+            ValueError: If rule_id is not found or action is not a valid value.
+        """
+        if action not in ("applied", "dismissed"):
+            raise ValueError(
+                f"Invalid feedback action '{action}'. Must be 'applied' or 'dismissed'."
+            )
+
+        results = self.collection.get(ids=[rule_id], include=["documents", "metadatas"])
+        if not results.get("ids"):
+            raise ValueError(f"Rule '{rule_id}' not found.")
+
+        metadata = dict(results["metadatas"][0]) if results.get("metadatas") else {}
+
+        times_served = metadata.get("times_served", 0) + 1
+        times_applied = metadata.get("times_applied", 0) + (1 if action == "applied" else 0)
+        times_dismissed = metadata.get("times_dismissed", 0) + (1 if action == "dismissed" else 0)
+
+        metadata["times_served"] = times_served
+        metadata["times_applied"] = times_applied
+        metadata["times_dismissed"] = times_dismissed
+
+        if metadata.get("status") == "needs_review":
+            metadata["status"] = self._evaluate_promotion(times_served, times_applied)
+
+        self.collection.update(ids=[rule_id], metadatas=[metadata])
+
+    @staticmethod
+    def _evaluate_promotion(times_served: int, times_applied: int) -> str:
+        """
+        Returns 'active' when auto-promotion criteria are met, else 'needs_review'.
+
+        Criteria: served >= 5 times AND acceptance rate strictly > 70%.
+        """
+        _MIN_SERVES = 5
+        _ACCEPTANCE_THRESHOLD = 0.70
+
+        if times_served < _MIN_SERVES:
+            return "needs_review"
+        acceptance_rate = times_applied / times_served
+        return "active" if acceptance_rate > _ACCEPTANCE_THRESHOLD else "needs_review"
+
+    def get_rule_effectiveness(self, rule_id: str) -> dict:
+        """
+        Returns effectiveness stats for a single rule.
+
+        Returns a dict with: rule_id, times_served, times_applied, times_dismissed,
+        acceptance_rate.
+
+        Raises:
+            ValueError: If the rule is not found.
+        """
+        results = self.collection.get(ids=[rule_id], include=["documents", "metadatas"])
+        if not results.get("ids"):
+            raise ValueError(f"Rule '{rule_id}' not found.")
+
+        metadata = results["metadatas"][0] if results.get("metadatas") else {}
+        times_served = metadata.get("times_served", 0)
+        times_applied = metadata.get("times_applied", 0)
+        times_dismissed = metadata.get("times_dismissed", 0)
+        acceptance_rate = times_applied / times_served if times_served > 0 else 0.0
+
+        return {
+            "rule_id": rule_id,
+            "times_served": times_served,
+            "times_applied": times_applied,
+            "times_dismissed": times_dismissed,
+            "acceptance_rate": acceptance_rate,
+        }
+
+    def get_all_effectiveness_stats(self) -> dict:
+        """
+        Returns aggregate effectiveness stats across every rule in the collection.
+
+        Structure:
+          {
+            "rules": [ { rule_id, times_served, times_applied, times_dismissed,
+                         acceptance_rate }, ... ],
+            "totals": { total_served, total_applied, total_dismissed,
+                        overall_acceptance_rate }
+          }
+        """
+        results = self.collection.get(include=["documents", "metadatas"])
+
+        ids = results.get("ids") or []
+        metadatas = results.get("metadatas") or []
+
+        rule_stats = []
+        total_served = 0
+        total_applied = 0
+        total_dismissed = 0
+
+        for rule_id, meta in zip(ids, metadatas):
+            meta = meta or {}
+            served = meta.get("times_served", 0)
+            applied = meta.get("times_applied", 0)
+            dismissed = meta.get("times_dismissed", 0)
+            rate = applied / served if served > 0 else 0.0
+
+            rule_stats.append({
+                "rule_id": rule_id,
+                "times_served": served,
+                "times_applied": applied,
+                "times_dismissed": dismissed,
+                "acceptance_rate": rate,
+            })
+            total_served += served
+            total_applied += applied
+            total_dismissed += dismissed
+
+        overall_rate = total_applied / total_served if total_served > 0 else 0.0
+
+        return {
+            "rules": rule_stats,
+            "totals": {
+                "total_served": total_served,
+                "total_applied": total_applied,
+                "total_dismissed": total_dismissed,
+                "overall_acceptance_rate": overall_rate,
+            },
+        }
+
     def add_rule(self, repo: str, title: str, description: str, enforcement: str):
         """Manually adds a rule from the UI."""
         rule_id = os.urandom(4).hex()
@@ -301,6 +452,32 @@ class LightRAGManager:
             ids=[rule_id]
         )
         return rule_id
+
+    def reindex_all_rules(self) -> int:
+        """Re-embed all rules in enterprise_rejections using the current embed_fn.
+
+        Deletes all existing vectors and re-adds them so the new embedding model
+        is applied uniformly.  Returns the number of rules re-indexed.
+
+        Must be called after changing EMBEDDING_MODEL to prevent dimension mismatches
+        between old and new vectors in the same collection.
+        """
+        snapshot = self.collection.get(include=["documents", "metadatas"])
+
+        rule_ids: list[str] = snapshot.get("ids", [])
+        if not rule_ids:
+            return 0
+
+        documents: list[str] = snapshot["documents"]
+        metadatas: list[dict] = snapshot["metadatas"]
+
+        self.collection.delete(ids=rule_ids)
+        self.collection.add(
+            ids=rule_ids,
+            documents=documents,
+            metadatas=metadatas,
+        )
+        return len(rule_ids)
         
     def generate_rag_system_prompt(self, base_prompt: str, code_diff: str) -> str:
         """Helper to inject the contextual vectors directly into the student LLM instructions."""
