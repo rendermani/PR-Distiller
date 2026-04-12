@@ -13,6 +13,60 @@ from llm.intent_checker import IntentChecker
 from llm.router import SmallLLMRouter
 from llm.extractor import LargeLLMExtractor
 
+
+def repo_slug_from_pr_url(pull_request_url: str) -> str:
+    """Extracts 'owner/repo' from a GitHub API pull_request_url.
+
+    Example input:
+        https://api.github.com/repos/langchain-ai/langchain/pulls/36613
+    Example output:
+        langchain-ai/langchain
+    Returns an empty string when the URL does not match the expected pattern.
+    """
+    prefix = "https://api.github.com/repos/"
+    if not pull_request_url or not pull_request_url.startswith(prefix):
+        return ""
+    remainder = pull_request_url[len(prefix):]
+    parts = remainder.split("/")
+    if len(parts) < 2:
+        return ""
+    return f"{parts[0]}/{parts[1]}"
+
+
+def process_comment(
+    comment: dict,
+    pr: dict,
+    extractor: LargeLLMExtractor,
+    redactor: SecurityRedactor,
+    dedup: DeduplicationFilter,
+    intent: IntentChecker,
+    slicer: ASTSlicer,
+) -> dict | None:
+    """Applies the full filter pipeline to a single comment and calls extract_rule.
+
+    Returns the extracted rule dict on success, or None when the comment is
+    skipped (duplicate, non-code intent) or extraction fails.
+    """
+    body = comment.get("body", "")
+
+    if dedup.is_duplicate(body):
+        return None
+
+    safe_text = redactor.redact_text(body)
+
+    if intent.check_intent(safe_text) != "CODE":
+        return None
+
+    diff = pr.get("diff", "")
+    target_line = comment.get("line") or comment.get("original_line") or 0
+    sliced_ast = slicer.get_node_at_line(diff, target_line)
+
+    pr_url = comment.get("pull_request_url", "")
+    repo = repo_slug_from_pr_url(pr_url)
+
+    return extractor.extract_rule(safe_text, sliced_ast, repo)
+
+
 def main():
     print("🚀 Initializing Enterprise AGILE-RULE-EXTRACTOR Production Pipeline...")
     
@@ -43,34 +97,34 @@ def main():
         for comment in pr["comments"]:
             body = comment.get("body", "")
 
-            # 1. Pipeline: Defensive Filtering
+            # 1. Pipeline: Defensive Filtering (dedup + redaction + intent)
             if dedup.is_duplicate(body):
                 continue
             safe_text = redactor.redact_text(body)
             if intent.check_intent(safe_text) != "CODE":
                 continue
 
-            # 2. Pipeline: AI Routing & CodeRAG
+            # 2. Pipeline: AI Routing & CodeRAG cache pre-check
             route_info = router.categorize_comment(safe_text)
             route = route_info.get("route")
-            
+
             if route == "exact_match_found":
                 print(f"\\n✅ [CodeRAG Cache Hit]: Reusing Rule ID {route_info['cached_rule']}")
                 success += 1
                 continue
             elif route == "discard_noise":
                 continue
-                
-            # 3. Pipeline: AST Context Assembly
+
+            # 3. Pipeline: AST Context Assembly + Extraction
             diff = pr.get("diff", "")
             target_line = comment.get("line") or comment.get("original_line") or 0
             sliced_ast = slicer.get_node_at_line(diff, target_line)
-            
-            # 4. Pipeline: Deep-Dive Teacher Extraction 
-            # Submits to our Heavy DGX Model / Gemini PRO explicitly overriding strict JSON
+            pr_url = comment.get("pull_request_url", "")
+            repo = repo_slug_from_pr_url(pr_url)
+
             print(f"\\n⏳ [Extraction Pending] Target: {safe_text[:60]}... \\n -> Pushing to Heavy Architecture Endpoints...")
-            rule = extractor.extract_rule(safe_text, sliced_ast)
-            
+            rule = extractor.extract_rule(safe_text, sliced_ast, repo)
+
             if rule:
                 print(f"\\n🎯 [Extraction Success] Rule Generated & Inserted into CodeRAG Context:\\n{json.dumps(rule, indent=2)}")
                 success += 1
