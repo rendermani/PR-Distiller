@@ -14,6 +14,17 @@ dependencies = [
     "presidio-analyzer",
     "presidio-anonymizer",
     "chromadb",
-    "networkx",
-    "llama-index"
+    "litellm",
+    "cryptography",
+    "tree-sitter>=0.22",
+    "tree-sitter-javascript",
+    "tree-sitter-typescript",
+    "tree-sitter-go",
+    "tree-sitter-rust"
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "scripts"]
+
+[tool.coverage.run]
+source = [".", "db", "llm", "pipeline"]

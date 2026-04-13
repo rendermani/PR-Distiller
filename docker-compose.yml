@@ -1,0 +1,86 @@
+services:
+  # ---------------------------------------------------------------------------
+  # Ollama — local LLM inference (CPU by default, GPU via override)
+  # ---------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  # ---------------------------------------------------------------------------
+  # Backend — FastAPI + ChromaDB + LLM extraction pipeline
+  # ---------------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "${API_PORT:-8923}:8923"
+    volumes:
+      - backend_data:/app/data
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - LLM_API_BASE=http://ollama:11434/v1
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_MODEL=${LLM_MODEL:-ollama/qwen2.5-coder:7b-instruct}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-BAAI/bge-base-en-v1.5}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-}
+      - FERNET_KEY=${FERNET_KEY:-}
+      - API_AUTH_TOKEN=${API_AUTH_TOKEN:-}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:4096,http://localhost:3000}
+      - DATA_DIR=/app/data
+    depends_on:
+      ollama:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8923/api/rules || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # Web UI — Next.js dashboard
+  # ---------------------------------------------------------------------------
+  web-ui:
+    build:
+      context: ./web-ui
+      dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8923}
+    ports:
+      - "${WEB_PORT:-4096}:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # MCP Server — TypeScript bridge for Cursor / Claude Code
+  # MCP uses stdio — run via: docker compose run --rm mcp-server
+  # ---------------------------------------------------------------------------
+  mcp-server:
+    build:
+      context: ./mcp-server
+      dockerfile: Dockerfile
+    environment:
+      - PR_DISTILLER_API_URL=http://backend:8923
+    depends_on:
+      - backend
+    stdin_open: true
+    profiles:
+      - mcp
+
+volumes:
+  ollama_models:
+  backend_data:

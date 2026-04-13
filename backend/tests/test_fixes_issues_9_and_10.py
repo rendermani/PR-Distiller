@@ -125,6 +125,10 @@ class TestOrchestratorPreProcessing(unittest.IsolatedAsyncioTestCase):
             return []
 
         with patch("pipeline.job_orchestrator.crawl_human_rejections", return_value=(crawled_tuples, {})), \
+             patch("pipeline.job_orchestrator.crawl_pr_reviews", return_value=([], {})), \
+             patch("pipeline.job_orchestrator.crawl_closed_issues", return_value=([], {})), \
+             patch.object(orchestrator.conf, "load_config", return_value={"crawl_cursors": {}}), \
+             patch.object(orchestrator.conf, "save_config"), \
              patch("pipeline.job_orchestrator.LargeLLMExtractor") as MockExtractor:
 
             mock_extractor_instance = MagicMock()
@@ -171,6 +175,10 @@ class TestOrchestratorPreProcessing(unittest.IsolatedAsyncioTestCase):
         mock_redactor.redact_text.return_value = redacted_comment
 
         with patch("pipeline.job_orchestrator.crawl_human_rejections", return_value=(crawled_tuples, {})), \
+             patch("pipeline.job_orchestrator.crawl_pr_reviews", return_value=([], {})), \
+             patch("pipeline.job_orchestrator.crawl_closed_issues", return_value=([], {})), \
+             patch.object(orchestrator.conf, "load_config", return_value={"crawl_cursors": {}}), \
+             patch.object(orchestrator.conf, "save_config"), \
              patch("pipeline.job_orchestrator.SecurityRedactor", return_value=mock_redactor), \
              patch("pipeline.job_orchestrator.LargeLLMExtractor") as MockExtractor:
 
@@ -221,6 +229,10 @@ class TestOrchestratorPreProcessing(unittest.IsolatedAsyncioTestCase):
         mock_redactor.redact_text.return_value = redacted_a
 
         with patch("pipeline.job_orchestrator.crawl_human_rejections", return_value=(crawled_tuples, {})), \
+             patch("pipeline.job_orchestrator.crawl_pr_reviews", return_value=([], {})), \
+             patch("pipeline.job_orchestrator.crawl_closed_issues", return_value=([], {})), \
+             patch.object(orchestrator.conf, "load_config", return_value={"crawl_cursors": {}}), \
+             patch.object(orchestrator.conf, "save_config"), \
              patch("pipeline.job_orchestrator.SecurityRedactor", return_value=mock_redactor), \
              patch("pipeline.job_orchestrator.LargeLLMExtractor") as MockExtractor:
 

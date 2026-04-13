@@ -9,10 +9,16 @@
         "dev": "tsc --watch"
     },
     "dependencies": {
-        "@modelcontextprotocol/sdk": "latest"
+        "@modelcontextprotocol/sdk": "^1.29.0",
+        "tsx": "^4.21.0",
+        "zod": "^3.23.0"
     },
     "devDependencies": {
-        "typescript": "^5.0.0",
-        "@types/node": "^20.0.0"
-    }
+        "@types/node": "^20.19.39",
+        "typescript": "^5.9.3"
+    },
+    "keywords": [],
+    "author": "",
+    "license": "ISC",
+    "type": "commonjs"
 }

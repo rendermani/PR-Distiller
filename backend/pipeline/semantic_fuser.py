@@ -3,19 +3,20 @@ import json
 import uuid
 from litellm import completion
 from db.lightrag_manager import LightRAGManager
+import settings
 
 class SemanticFuser:
     """
     Phase 2 Big Data Deduplicator.
-    Handles mathematical collisions in ChromaDB by feeding both conflicting vectors 
+    Handles mathematical collisions in ChromaDB by feeding both conflicting vectors
     back into the local Small LLM for an intelligent merge.
     """
     def __init__(self, db_manager: LightRAGManager):
         self.db = db_manager
         # We actively target the 7B node for fast text-merging tasks
-        self.model = os.environ.get("EXTRACTOR_MODEL", "openai/Qwen/Qwen2.5-Coder-7B-Instruct")
-        self.api_base = os.environ.get("EXTRACTOR_API_BASE", "http://gx10:8080/v1")
-        self.api_key = os.environ.get("EXTRACTOR_API_KEY", "dgx-dummy-key")
+        self.model = os.environ.get("EXTRACTOR_MODEL", settings.LLM_MODEL)
+        self.api_base = os.environ.get("EXTRACTOR_API_BASE", settings.LLM_API_BASE)
+        self.api_key = os.environ.get("EXTRACTOR_API_KEY", settings.LLM_API_KEY)
 
     def process_and_fuse(self, new_rule_json: dict):
         """
@@ -25,8 +26,15 @@ class SemanticFuser:
         content = new_rule_json.get("content", {})
         document_text = f"Rule: {content.get('title')} - Context: {content.get('description')}. Enforce: {content.get('enforcement_prompt')}"
         
-        # 1. Execute purely mathematical Vector Distance checking against the database
-        matched_id, matched_doc, matched_metadatas = self.db.find_similar_rule(document_text, distance_threshold=0.45)
+        repo = new_rule_json.get("metadata", {}).get("repo", "global")
+
+        # 0. Skip if this matches a blocked rule
+        if self.db.is_blocked(document_text, repo):
+            print(f"[Semantic Fuser] Skipped — matches a blocked rule in {repo}")
+            return None
+
+        # 1. Execute purely mathematical Vector Distance checking against the database explicitly isolated natively to the target Git Repository
+        matched_id, matched_doc, matched_metadatas = self.db.find_similar_rule(document_text, repo=repo, distance_threshold=0.32)
 
         if not matched_id:
             # Clean insertion if the vector is fundamentally distinct
@@ -41,7 +49,7 @@ class SemanticFuser:
             "You will be given two highly overlapping developer constraints. "
             "Merge them into a single, unified constraint without losing any unique technical nuances from either. "
             "Output ONLY valid JSON following this schema: "
-            "{'rule_id': 'uuid', 'metadata': {'status': 'active'}, 'content': {'title': '...', 'description': '...', 'enforcement_prompt': '...'}}"
+            "{\"rule_id\": \"uuid\", \"metadata\": {\"status\": \"active\"}, \"content\": {\"title\": \"...\", \"description\": \"...\", \"enforcement_prompt\": \"...\"}}"
         )
 
         user_prompt = f'''
@@ -78,13 +86,22 @@ class SemanticFuser:
             # Mathematical Fusing: Combine total volumes observed of this architectural failure
             base_occurrences = matched_metadatas.get("occurrence_count", 1) if matched_metadatas else 1
             new_occurrences = new_rule_json.get("metadata", {}).get("occurrence_count", 1)
-            
+
             if "metadata" not in fused_rule:
                 fused_rule["metadata"] = {}
-                
+
             fused_rule["metadata"]["occurrence_count"] = base_occurrences + new_occurrences
-            
-            # 3. Destructively purge the obsolete redundant string from vector space, then write the synthesized truth
+            fused_rule["metadata"]["repo"] = repo
+            fused_rule["metadata"]["status"] = "needs_review"
+
+            # Versioning: record which rules were merged to produce this one
+            old_merge_count = matched_metadatas.get("merge_count", 0) if matched_metadatas else 0
+            fused_rule["metadata"]["merge_count"] = old_merge_count + 1
+            new_rule_id = new_rule_json.get("rule_id", "")
+            fused_rule["metadata"]["merged_from"] = f"{matched_id},{new_rule_id}"
+
+            # 3. Archive old rule for rollback lineage, then purge and store the synthesised truth
+            self.db.archive_rule(matched_id, merged_into_id=fused_rule["rule_id"])
             self.db.delete_rule(matched_id)
             self.db.store_rule(fused_rule)
             

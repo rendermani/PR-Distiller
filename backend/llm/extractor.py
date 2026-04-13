@@ -4,38 +4,113 @@ import asyncio
 from litellm import completion, acompletion
 from db.lightrag_manager import LightRAGManager
 from pipeline.semantic_fuser import SemanticFuser
+import settings
 
 class LargeLLMExtractor:
+    CLASSIFY_PROMPT = (
+        "You classify PR review comments. Respond with ONLY one word:\n"
+        '- "EXTRACT" if the comment contains an actionable, generalizable coding rule '
+        "(code quality, architecture, security, performance, correctness)\n"
+        '- "SKIP" if it\'s a translation fix, typo, question, discussion, one-time fix, or not about code\n\n'
+        "Respond with exactly one word: EXTRACT or SKIP"
+    )
+
     def __init__(self, db_manager: LightRAGManager):
-        self.model = os.environ.get("EXTRACTOR_MODEL", "openai/Qwen/Qwen2.5-Coder-7B-Instruct")
-        self.api_base = os.environ.get("EXTRACTOR_API_BASE", "http://gx10:8080/v1")
-        self.api_key = os.environ.get("EXTRACTOR_API_KEY", "dgx-dummy-key")
+        self.model = os.environ.get("EXTRACTOR_MODEL", settings.LLM_MODEL)
+        self.api_base = os.environ.get("EXTRACTOR_API_BASE", settings.LLM_API_BASE)
+        self.api_key = os.environ.get("EXTRACTOR_API_KEY", settings.LLM_API_KEY)
         self.db = db_manager
         self.fuser = SemanticFuser(db_manager)
         
-    def extract_rule(self, pr_comment: str, modified_ast_code: str) -> dict:
-        system_prompt = (
-            "You are an expert AI Architect extracting coding rules into strict JSON. "
-            "Your goal is to parse reviewer feedback and isolate what the Copilot did WRONG. "
-            "Output ONLY valid JSON following this schema: "
-            "{'rule_id': 'uuid', 'metadata': {'status': 'active'}, 'content': {'title': '...', 'description': '...', 'enforcement_prompt': '...'}}"
+    # All valid category values for issue #7.
+    VALID_CATEGORIES = frozenset({
+        "security", "performance", "testing", "code-style", "architecture", "correctness"
+    })
+
+    # Confidence threshold above which a rule is auto-approved (issue #6).
+    AUTO_APPROVE_CONFIDENCE_THRESHOLD = 0.8
+
+    SYSTEM_PROMPT = (
+        "You extract reusable coding rules from PR review feedback.\n\n"
+        "ONLY extract rules that are:\n"
+        "- About CODE QUALITY, ARCHITECTURE, SECURITY, PERFORMANCE, or CORRECTNESS\n"
+        "- Generalizable — would apply to future code in this project, not just a one-off fix\n"
+        "- Actionable — an AI code assistant could enforce this rule\n\n"
+        "DO NOT extract rules about:\n"
+        "- Translations, documentation wording, typos, or formatting\n"
+        "- One-time version bumps, link fixes, or config value changes\n"
+        "- Comments that are questions or discussions, not corrections\n\n"
+        "If the review comment is NOT a generalizable coding rule, respond with exactly: {\"skip\": true}\n\n"
+        "Otherwise output ONLY valid JSON:\n"
+        "{\"rule_id\": \"uuid\", "
+        "\"confidence\": 0.0, "
+        "\"category\": \"security|performance|testing|code-style|architecture|correctness\", "
+        "\"metadata\": {\"status\": \"active\"}, "
+        "\"scoping\": {\"path_patterns\": [\"e.g., **/auth/*.py\"]}, "
+        "\"content\": {\"title\": \"short imperative title\", "
+        "\"description\": \"when and why this rule matters\", "
+        "\"enforcement_prompt\": \"what an AI assistant must do or avoid\", "
+        "\"code_examples\": {\"bad_code\": \"...\", \"good_code\": \"...\"}}}\n\n"
+        "Fields:\n"
+        "- confidence: float 0.0-1.0 — how confident you are this is a real, generalizable rule\n"
+        "- category: exactly one of: security, performance, testing, code-style, architecture, correctness"
+    )
+
+    @staticmethod
+    def _build_user_prompt(pr_comment: str, modified_ast_code: str) -> str:
+        """Builds the user message sent to the LLM for rule extraction."""
+        return (
+            f"        <REVIEW_DATA>\n"
+            f"        {pr_comment}\n"
+            f"        </REVIEW_DATA>\n\n"
+            f"        <CODE_DIFF>\n"
+            f"        {modified_ast_code}\n"
+            f"        </CODE_DIFF>\n"
+            f"        "
         )
-        
-        user_prompt = f'''
-        <REVIEW_DATA>
-        {pr_comment}
-        </REVIEW_DATA>
-        
-        <CODE_DIFF>
-        {modified_ast_code}
-        </CODE_DIFF>
-        '''
-        
+
+    @staticmethod
+    def _parse_llm_response(raw_content: str) -> dict:
+        """Strips optional markdown fences and parses the JSON response from the LLM."""
+        if raw_content.startswith("```json"):
+            raw_content = raw_content.replace("```json", "").replace("```", "").strip()
+        return json.loads(raw_content)
+
+    def _apply_metadata(self, rule_dict: dict, repo: str) -> dict:
+        """
+        Populates metadata from LLM fields: confidence, category, repo, status.
+        High confidence (> AUTO_APPROVE_CONFIDENCE_THRESHOLD) auto-approves the rule.
+        Returns the mutated rule_dict.
+        """
+        if "metadata" not in rule_dict:
+            rule_dict["metadata"] = {}
+
+        confidence = rule_dict.get("confidence")
+        category = rule_dict.get("category")
+
+        if confidence is not None:
+            rule_dict["metadata"]["confidence"] = confidence
+
+        if category is not None:
+            rule_dict["metadata"]["category"] = category
+
+        is_high_confidence = (
+            confidence is not None
+            and confidence > self.AUTO_APPROVE_CONFIDENCE_THRESHOLD
+        )
+        rule_dict["metadata"]["status"] = "active" if is_high_confidence else "needs_review"
+        rule_dict["metadata"]["repo"] = repo
+
+        return rule_dict
+
+    def extract_rule(self, pr_comment: str, modified_ast_code: str, repo: str) -> dict:
+        user_prompt = self._build_user_prompt(pr_comment, modified_ast_code)
+
         try:
             response = completion(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": self.SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt}
                 ],
                 api_base=self.api_base,
@@ -43,43 +118,29 @@ class LargeLLMExtractor:
                 temperature=0.1
             )
             raw_content = response.choices[0].message.content.strip()
-            
-            if raw_content.startswith("```json"):
-                raw_content = raw_content.replace("```json", "").replace("```", "").strip()
-                
-            rule_dict = json.loads(raw_content)
-            
-            # Replaced naive storage with the new Dynamic Semantic Deduplication engine
+            rule_dict = self._parse_llm_response(raw_content)
+
+            # LLM signaled this comment isn't a useful rule
+            if rule_dict.get("skip"):
+                print("[Extractor] Skipped non-rule comment")
+                return None
+
+            self._apply_metadata(rule_dict, repo)
             self.fuser.process_and_fuse(rule_dict)
             return rule_dict
-            
+
         except Exception as e:
             print(f"[Extractor Error]: {e}")
             return None
 
-    async def async_extract_rule(self, pr_comment: str, modified_ast_code: str) -> dict:
-        system_prompt = (
-            "You are an expert AI Architect extracting coding rules into strict JSON. "
-            "Your goal is to parse reviewer feedback and isolate what the Copilot did WRONG. "
-            "Output ONLY valid JSON following this schema: "
-            "{'rule_id': 'uuid', 'metadata': {'status': 'active'}, 'content': {'title': '...', 'description': '...', 'enforcement_prompt': '...'}}"
-        )
-        
-        user_prompt = f'''
-        <REVIEW_DATA>
-        {pr_comment}
-        </REVIEW_DATA>
-        
-        <CODE_DIFF>
-        {modified_ast_code}
-        </CODE_DIFF>
-        '''
+    async def async_extract_rule(self, pr_comment: str, modified_ast_code: str, repo: str) -> dict:
+        user_prompt = self._build_user_prompt(pr_comment, modified_ast_code)
 
         try:
             response = await acompletion(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": self.SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt}
                 ],
                 api_base=self.api_base,
@@ -87,19 +148,50 @@ class LargeLLMExtractor:
                 temperature=0.1
             )
             raw_content = response.choices[0].message.content.strip()
-            if raw_content.startswith("```json"):
-                raw_content = raw_content.replace("```json", "").replace("```", "").strip()
-                
-            rule_dict = json.loads(raw_content)
-            
-            # Run organic deduplication merge
+            rule_dict = self._parse_llm_response(raw_content)
+
+            if rule_dict.get("skip"):
+                print("[Extractor] Skipped non-rule comment")
+                return None
+
+            self._apply_metadata(rule_dict, repo)
             self.fuser.process_and_fuse(rule_dict)
             return rule_dict
         except Exception as e:
             print(f"[Async Extractor Error]: {e}")
             return None
 
-    async def batch_extract(self, payloads: list) -> list:
-        tasks = [self.async_extract_rule(c, a) for (c, a) in payloads]
-        results = await asyncio.gather(*tasks)
+    async def _async_classify(self, comment: str) -> bool:
+        """Fast binary classifier — returns True if worth extracting."""
+        try:
+            response = await acompletion(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": self.CLASSIFY_PROMPT},
+                    {"role": "user", "content": f"Comment: {comment[:500]}"}
+                ],
+                api_base=self.api_base,
+                api_key=self.api_key,
+                temperature=0.0,
+                max_tokens=10
+            )
+            raw = response.choices[0].message.content.strip().upper()
+            if '</think>' in raw:
+                raw = raw.split('</think>')[-1].strip()
+            return 'EXTRACT' in raw
+        except Exception:
+            return True  # err on side of caution
+
+    async def batch_extract(self, payloads: list, repo: str) -> list:
+        # Pass 1: fast classify all comments in parallel
+        classify_tasks = [self._async_classify(c) for (c, _) in payloads]
+        classifications = await asyncio.gather(*classify_tasks)
+
+        keepers = [(c, d) for (c, d), keep in zip(payloads, classifications) if keep]
+        skipped = len(payloads) - len(keepers)
+        print(f"[Two-Pass] Classified {len(payloads)} -> {len(keepers)} to extract, {skipped} skipped")
+
+        # Pass 2: extract only the keepers
+        extract_tasks = [self.async_extract_rule(c, a, repo) for (c, a) in keepers]
+        results = await asyncio.gather(*extract_tasks)
         return [r for r in results if r is not None]

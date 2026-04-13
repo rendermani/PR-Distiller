@@ -121,7 +121,7 @@ class LightRAGManager:
         """
         Stores the high-quality rule extracted by the 70B Teacher / Gemini 3.1 Pro.
         """
-        rule_id = rule_json.get("rule_id", os.urandom(4).hex())
+        rule_id = rule_json.get("rule_id", os.urandom(8).hex())
         content = rule_json.get("content", {})
         description = content.get("description", "")
         enforcement = content.get("enforcement_prompt", "")
@@ -191,8 +191,7 @@ class LightRAGManager:
             "merged_into": merged_into_id,
         }
 
-        import os as _os
-        archive_id = _os.urandom(8).hex()
+        archive_id = os.urandom(8).hex()
         self.history_collection.add(
             ids=[archive_id],
             documents=[document],

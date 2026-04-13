@@ -9,8 +9,6 @@ from pipeline.security_redactor import SecurityRedactor
 from pipeline.deduplication import DeduplicationFilter
 from pipeline.ast_slicer import ASTSlicer
 from db.lightrag_manager import LightRAGManager
-from llm.intent_checker import IntentChecker
-from llm.router import SmallLLMRouter
 from llm.extractor import LargeLLMExtractor
 
 
@@ -39,7 +37,7 @@ def process_comment(
     extractor: LargeLLMExtractor,
     redactor: SecurityRedactor,
     dedup: DeduplicationFilter,
-    intent: IntentChecker,
+    intent,
     slicer: ASTSlicer,
 ) -> dict | None:
     """Applies the full filter pipeline to a single comment and calls extract_rule.
@@ -78,13 +76,11 @@ def main():
     redactor = SecurityRedactor()
     dedup = DeduplicationFilter()
     slicer = ASTSlicer()
-    intent = IntentChecker()
-    
+
     # Initialize Core Persistent CodeRAG Components
     db_manager = LightRAGManager()
-    
-    # Initialize Intelligent AI Layers
-    router = SmallLLMRouter(db_manager)
+
+    # Initialize Extraction Layer
     extractor = LargeLLMExtractor(db_manager)
 
     print(f"[*] Sub-systems synced. Target Extractor Endpoint: {extractor.api_base}")
@@ -97,39 +93,26 @@ def main():
         for comment in pr["comments"]:
             body = comment.get("body", "")
 
-            # 1. Pipeline: Defensive Filtering (dedup + redaction + intent)
+            # 1. Pipeline: Defensive Filtering (dedup + redaction)
             if dedup.is_duplicate(body):
                 continue
             safe_text = redactor.redact_text(body)
-            if intent.check_intent(safe_text) != "CODE":
-                continue
 
-            # 2. Pipeline: AI Routing & CodeRAG cache pre-check
-            route_info = router.categorize_comment(safe_text)
-            route = route_info.get("route")
-
-            if route == "exact_match_found":
-                print(f"\\n✅ [CodeRAG Cache Hit]: Reusing Rule ID {route_info['cached_rule']}")
-                success += 1
-                continue
-            elif route == "discard_noise":
-                continue
-
-            # 3. Pipeline: AST Context Assembly + Extraction
+            # 2. Pipeline: AST Context Assembly + Extraction
             diff = pr.get("diff", "")
             target_line = comment.get("line") or comment.get("original_line") or 0
             sliced_ast = slicer.get_node_at_line(diff, target_line)
             pr_url = comment.get("pull_request_url", "")
             repo = repo_slug_from_pr_url(pr_url)
 
-            print(f"\\n⏳ [Extraction Pending] Target: {safe_text[:60]}... \\n -> Pushing to Heavy Architecture Endpoints...")
+            print(f"[Extraction Pending] Target: {safe_text[:60]}...")
             rule = extractor.extract_rule(safe_text, sliced_ast, repo)
 
             if rule:
-                print(f"\\n🎯 [Extraction Success] Rule Generated & Inserted into CodeRAG Context:\\n{json.dumps(rule, indent=2)}")
+                print(f"[Extraction Success] Rule Generated & Inserted into CodeRAG Context:\n{json.dumps(rule, indent=2)}")
                 success += 1
             else:
-                print(f"❌ [Extraction Failed] Heavy Endpoint dropped the JSON Payload.")
+                print("[Extraction Failed] Heavy Endpoint dropped the JSON Payload.")
 
     elapsed = time.time() - start_cpu_time
     print(f"\\n==========================\\n🏁 PRODUCTION RUN COMPLETE\\nProcessed Test Nodes in {elapsed:.2f}s | Successfully Generated & Vented Rules to CodeRAG Database: {success}\\n==========================")

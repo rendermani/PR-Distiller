@@ -1,0 +1,19 @@
+# GPU acceleration for Ollama (NVIDIA only).
+#
+# This file is automatically loaded by Docker Compose when present.
+# Remove or rename it on machines without an NVIDIA GPU (e.g., macOS, CPU-only Linux).
+#
+# Usage:
+#   With GPU:    docker compose up        (this file is auto-loaded)
+#   Without GPU: docker compose -f docker-compose.yml up
+#   Or simply:   mv docker-compose.override.yml docker-compose.gpu.yml
+#
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json as _json
+import logging
 import os
 import sys
 import time
@@ -16,13 +17,16 @@ from db.lightrag_manager import LightRAGManager
 from pipeline.config_manager import ConfigManager
 from pipeline.job_orchestrator import JobOrchestrator
 from pipeline import dev_cache
+import settings
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="PR-Distiller Knowledge API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -36,7 +40,7 @@ orchestrator = JobOrchestrator(db)
 # Webhook helpers
 # ---------------------------------------------------------------------------
 
-WEBHOOK_MIN_INTERVAL_SECONDS = 60
+WEBHOOK_MIN_INTERVAL_SECONDS = settings.WEBHOOK_MIN_INTERVAL
 
 
 def verify_github_signature(payload_body: bytes, signature: str, secret: str) -> bool:
@@ -109,10 +113,18 @@ class JobRequest(BaseModel):
     threshold: float = 0.45
     use_cache: bool = False
 
+def _redact_sensitive_fields(config: dict) -> dict:
+    """Return a copy of config with sensitive secrets replaced by '***' or ''."""
+    redacted = dict(config)
+    for field in ("github_token", "llm_api_key"):
+        redacted[field] = "***" if config.get(field) else ""
+    return redacted
+
+
 @app.get("/api/config")
 def get_config():
     """Serves the Unified JSON configurations to the Next.js UI Settings panel."""
-    return conf_manager.load_config()
+    return _redact_sensitive_fields(conf_manager.load_config())
 
 @app.post("/api/config")
 def update_config(payload: dict):
@@ -131,7 +143,7 @@ def get_cache_info(repo: str):
 async def start_pipeline(req: JobRequest):
     """Hits the explicit trigger allocating asynchronous DGX mapping routines."""
     current_config = conf_manager.load_config()
-    job_id = orchestrator.trigger_job(req.dict(), current_config)
+    job_id = orchestrator.trigger_job(req.model_dump(), current_config)
     return {"job_id": job_id, "status": "started"}
 
 @app.post("/api/jobs/cancel/{job_id}")
@@ -305,8 +317,8 @@ def export_rules(repo: str, type: str = "prompt", arch: str = "openai"):
         export_content = SkillSynthesizer.export(active_docs, repo, type, arch)
         return {"content": export_content}
     except Exception as e:
-        import traceback
-        return {"content": f"PYTHON PIPELINE CRASH:\\n{str(e)}\\n\\n{traceback.format_exc()}"}
+        logger.exception("Export pipeline failed for repo=%s type=%s arch=%s", repo, type, arch)
+        raise HTTPException(status_code=500, detail="Export pipeline failed. See server logs for details.")
 
 # ---------------------------------------------------------------------------
 # Webhook endpoints
@@ -362,5 +374,5 @@ def get_webhook_stats():
 
 
 if __name__ == "__main__":
-    print("[*] Starting PR-Distiller Edge API on port 8000...")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    print(f"[*] Starting PR-Distiller Edge API on {settings.API_HOST}:{settings.API_PORT}...")
+    uvicorn.run(app, host=settings.API_HOST, port=settings.API_PORT)

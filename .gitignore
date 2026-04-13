@@ -1,57 +1,47 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-env/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# Virtual Environment
-venv/
-.env
-
-# Node.js
+# Dependencies
 node_modules/
-.npm/
-logs
-*.log
-npm-debug.log*
+**/venv/
+__pycache__/
+*.pyc
+*.pyo
 
-# Databases / Data sets
-backend/data/
-*.sqlite
-*.db
-chroma_db/
-kuzu_db/
-experiment_results.json
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+backend/data/.secret_key
+backend/data/config.json
 
-# IDEs
-.idea/
+# Data & caches
+backend/data/chroma_db/
+backend/data/code_rag_vectors/
+backend/data/dev_cache/
+backend/data/*.json
+!backend/data/.gitkeep
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+.next/
+out/
+
+# IDE
 .vscode/
+.idea/
 *.swp
+*.swo
+*~
 
-# OS generated files
+# OS
 .DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
 Thumbs.db
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Docker
+*.log
