@@ -73,18 +73,6 @@ make run-model                 # pulls qwen2.5-coder:7b-instruct
 make up                        # starts backend + web-ui in Docker
 ```
 
-<details>
-<summary>Power user: use MLX instead of Ollama</summary>
-
-MLX is Apple's native ML framework. Sometimes faster on M-series for quantized models, but more setup. Only bother if you're benchmarking.
-
-```bash
-pip install mlx-lm
-make run-mlx                   # terminal 1: starts mlx_lm.server on port 8080
-make up-mac-mlx                # terminal 2
-```
-</details>
-
 ### Windows — host Ollama (WSL2 or native)
 
 ```powershell
