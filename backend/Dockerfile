@@ -6,10 +6,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml .
-RUN pip install --no-cache-dir . && rm -rf /root/.cache/pip
-
 COPY . .
+RUN pip install --no-cache-dir . && rm -rf /root/.cache/pip
 
 RUN mkdir -p /app/data/chroma_db /app/data/dev_cache /app/data/code_rag_vectors
 

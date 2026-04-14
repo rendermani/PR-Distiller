@@ -1,11 +1,11 @@
 [build-system]
-requires = ["flit_core >=3.2,<4"]
-build-backend = "flit_core.buildapi"
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
 
 [project]
-name = "agile-rule-extractor-backend"
+name = "pr-distiller-backend"
 version = "0.1.0"
-description = "Backend for PR-Distiller AGILE-RULE-EXTRACTOR"
+description = "Backend for PR-Distiller"
 dependencies = [
     "fastapi>=0.100.0",
     "uvicorn>=0.23.0",
@@ -14,6 +14,7 @@ dependencies = [
     "presidio-analyzer",
     "presidio-anonymizer",
     "chromadb",
+    "sentence-transformers",
     "litellm",
     "cryptography",
     "tree-sitter>=0.22",
@@ -22,6 +23,10 @@ dependencies = [
     "tree-sitter-go",
     "tree-sitter-rust"
 ]
+
+[tool.setuptools]
+py-modules = ["api", "settings"]
+packages = ["db", "llm", "pipeline"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "scripts"]
