@@ -1,7 +1,5 @@
 .DEFAULT_GOAL := help
 MODEL ?= qwen2.5-coder:7b-instruct
-MLX_MODEL ?= mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
-MLX_PORT ?= 8080
 SHELL := /bin/bash
 
 # Compose file combinations
@@ -16,8 +14,8 @@ YELLOW := \033[33m
 RED    := \033[31m
 RESET  := \033[0m
 
-.PHONY: help up up-mac-ollama up-mac-mlx up-linux-gpu up-cpu down build logs \
-        run-model run-mlx test test-coverage lint preflight clean
+.PHONY: help up up-linux-gpu up-cpu down build logs \
+        run-model test test-coverage lint preflight clean
 
 ## —— General ——————————————————————————————————————————————
 
@@ -27,27 +25,13 @@ help: ## Show this help
 
 ## —— Start (pick one for your platform) ———————————————————
 
-up: ## Alias for up-mac-ollama (host Ollama — works on Mac/Windows/Linux)
-	@$(MAKE) up-mac-ollama
-
-up-mac-ollama: ## Mac/Win/Linux: backend + web-ui in Docker, Ollama on host
+up: ## Start services (backend + web-ui in Docker, Ollama on host)
 	@printf "$(CYAN)Checking host Ollama at localhost:11434...$(RESET)\n"
 	@curl -sf http://localhost:11434/api/tags >/dev/null 2>&1 || { \
 		printf "$(RED)Host Ollama is not reachable.$(RESET) Install: https://ollama.com/download\n"; \
 		printf "Then run: $(CYAN)ollama serve$(RESET) (or start the Ollama app)\n"; \
 		exit 1; }
 	LLM_API_BASE=http://host.docker.internal:11434/v1 docker compose $(COMPOSE_BASE) up -d
-	@$(MAKE) --no-print-directory _print-urls
-
-up-mac-mlx: ## Apple Silicon: backend + web-ui in Docker, MLX server on host
-	@printf "$(CYAN)Checking host MLX server at localhost:$(MLX_PORT)...$(RESET)\n"
-	@curl -sf http://localhost:$(MLX_PORT)/v1/models >/dev/null 2>&1 || { \
-		printf "$(RED)MLX server is not running on port $(MLX_PORT).$(RESET)\n"; \
-		printf "Start it with: $(CYAN)make run-mlx$(RESET)\n"; \
-		exit 1; }
-	LLM_API_BASE=http://host.docker.internal:$(MLX_PORT)/v1 \
-	LLM_MODEL=openai/$(MLX_MODEL) \
-	docker compose $(COMPOSE_BASE) up -d
 	@$(MAKE) --no-print-directory _print-urls
 
 up-linux-gpu: ## Linux+NVIDIA: everything in Docker with GPU acceleration
@@ -84,14 +68,6 @@ run-model: ## Pull the default LLM (host Ollama). MODEL=qwen2.5-coder:7b-instruc
 		docker compose $(COMPOSE_OLLAMA) exec ollama ollama pull $(MODEL); \
 	fi
 	@printf "$(GREEN)Model $(MODEL) ready.$(RESET)\n"
-
-run-mlx: ## Start the MLX server on the host (Apple Silicon only)
-	@command -v mlx_lm.server >/dev/null 2>&1 || { \
-		printf "$(RED)mlx_lm is not installed.$(RESET)\n"; \
-		printf "Install: $(CYAN)pip install mlx-lm$(RESET)\n"; \
-		exit 1; }
-	@printf "$(CYAN)Starting MLX server: $(MLX_MODEL) on port $(MLX_PORT)...$(RESET)\n"
-	mlx_lm.server --model $(MLX_MODEL) --port $(MLX_PORT)
 
 ## —— Development ——————————————————————————————————————————
 
@@ -177,17 +153,6 @@ preflight: ## Verify all requirements before first run
 			WARN=$$((WARN+1)); \
 		fi; \
 	fi; \
-	if [ "$$OS" = "Darwin" ]; then \
-		printf "  Checking MLX...             "; \
-		if command -v mlx_lm.server >/dev/null 2>&1; then \
-			printf "$(GREEN)AVAILABLE$(RESET) (use: make up-mac-mlx)\n"; \
-			PASS=$$((PASS+1)); \
-		else \
-			printf "$(YELLOW)NOT INSTALLED$(RESET) — pip install mlx-lm (optional, for MLX path)\n"; \
-			WARN=$$((WARN+1)); \
-		fi; \
-	fi; \
-	\
 	printf "  Checking ports...           "; \
 	PORT_OK=true; \
 	for port in $${API_PORT:-8923} $${WEB_PORT:-4096}; do \
@@ -211,9 +176,8 @@ preflight: ## Verify all requirements before first run
 		exit 1; \
 	else \
 		printf "  $(GREEN)Ready! Pick a start command:$(RESET)\n"; \
-		printf "    $(CYAN)make up-mac-ollama$(RESET)   Mac/Win/Linux with host Ollama\n"; \
-		printf "    $(CYAN)make up-mac-mlx$(RESET)      Apple Silicon with MLX\n"; \
-		printf "    $(CYAN)make up-linux-gpu$(RESET)    Linux + NVIDIA\n"; \
+		printf "    $(CYAN)make up$(RESET)              Mac/Win/Linux with host Ollama (recommended)\n"; \
+		printf "    $(CYAN)make up-linux-gpu$(RESET)    Linux + NVIDIA, everything in Docker\n"; \
 		printf "    $(CYAN)make up-cpu$(RESET)          CPU-only (any OS)\n\n"; \
 	fi
 

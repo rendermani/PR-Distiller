@@ -79,7 +79,7 @@ make up                        # starts backend + web-ui in Docker
 # Install Ollama from https://ollama.com/download (native Windows installer)
 ollama serve                   # runs in background automatically after install
 make run-model
-make up-mac-ollama             # same target works on Windows — points Docker at host Ollama
+make up                        # points Docker at host Ollama
 ```
 
 > Run `make` inside WSL2 or Git Bash. Docker Desktop must be running.
