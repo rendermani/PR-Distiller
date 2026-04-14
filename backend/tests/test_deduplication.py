@@ -9,7 +9,7 @@ Tests verify:
 - Empty string is handled without error.
 
 Run with:
-    cd /home/mani/Projects/PR-Analysis/backend
+    cd /home/mani/Projects/PR-Distiller/backend
     ./venv/bin/python -m pytest tests/test_deduplication.py -v --tb=short
 """
 import sys

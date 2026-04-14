@@ -1,22 +1,12 @@
 services:
   # ---------------------------------------------------------------------------
-  # Ollama — local LLM inference (CPU by default, GPU via override)
-  # ---------------------------------------------------------------------------
-  ollama:
-    image: ollama/ollama:latest
-    ports:
-      - "${OLLAMA_PORT:-11434}:11434"
-    volumes:
-      - ollama_models:/root/.ollama
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 15s
-
-  # ---------------------------------------------------------------------------
   # Backend — FastAPI + ChromaDB + LLM extraction pipeline
+  #
+  # The LLM itself is NOT in this file. Choose one:
+  #   - Host Ollama (Mac/Windows/Linux):  default LLM_API_BASE points to host
+  #   - Host MLX (Apple Silicon):         set LLM_API_BASE to host MLX server
+  #   - Containerized Ollama (Linux):     add -f docker-compose.ollama.yml
+  #   - NVIDIA GPU for container Ollama:  also add -f docker-compose.gpu.yml
   # ---------------------------------------------------------------------------
   backend:
     build:
@@ -30,7 +20,7 @@ services:
       - path: .env
         required: false
     environment:
-      - LLM_API_BASE=http://ollama:11434/v1
+      - LLM_API_BASE=${LLM_API_BASE:-http://host.docker.internal:11434/v1}
       - LLM_API_KEY=${LLM_API_KEY:-}
       - LLM_MODEL=${LLM_MODEL:-ollama/qwen2.5-coder:7b-instruct}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-BAAI/bge-base-en-v1.5}
@@ -40,9 +30,9 @@ services:
       - API_AUTH_TOKEN=${API_AUTH_TOKEN:-}
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:4096,http://localhost:3000}
       - DATA_DIR=/app/data
-    depends_on:
-      ollama:
-        condition: service_healthy
+    extra_hosts:
+      # Makes host.docker.internal resolve on Linux (no-op on Mac/Windows).
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8923/api/rules || exit 1"]
       interval: 10s
@@ -82,5 +72,4 @@ services:
       - mcp
 
 volumes:
-  ollama_models:
   backend_data:

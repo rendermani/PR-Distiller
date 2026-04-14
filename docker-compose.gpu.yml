@@ -1,0 +1,19 @@
+# Opt-in overlay: attach NVIDIA GPU to the containerized Ollama.
+# Requires docker-compose.ollama.yml and the NVIDIA Container Toolkit.
+#
+# Usage:
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.ollama.yml \
+#     -f docker-compose.gpu.yml \
+#     up -d
+
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

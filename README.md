@@ -1,8 +1,8 @@
-# PR-Analysis
+# PR-Distiller
 
 > Extract reusable coding rules from your team's PR review history and serve them to AI coding assistants in real-time.
 
-PR-Analysis crawls your GitHub repositories for merged pull request review comments, uses an LLM to classify and extract generalizable coding rules (security, architecture, performance, correctness, code-style, testing), deduplicates them semantically using ChromaDB vector similarity, and exposes them through a Model Context Protocol (MCP) server. IDE agents such as Cursor and Claude Code query the MCP server on every code change and receive project-specific constraints grounded in your team's actual review history.
+PR-Distiller crawls your GitHub repositories for merged pull request review comments, uses an LLM to classify and extract generalizable coding rules (security, architecture, performance, correctness, code-style, testing), deduplicates them semantically using ChromaDB vector similarity, and exposes them through a Model Context Protocol (MCP) server. IDE agents such as Cursor and Claude Code query the MCP server on every code change and receive project-specific constraints grounded in your team's actual review history.
 
 ## How It Works
 
@@ -51,58 +51,71 @@ flowchart LR
 
 ## Quick Start
 
-### Prerequisites
+Pick the path that matches your machine. Backend + Web UI always run in Docker; only the LLM placement differs.
 
-- Docker and Docker Compose v2
-- GitHub Personal Access Token with `repo` read scope (for crawling)
-- Optional: NVIDIA GPU for faster Ollama inference
-
-### Setup
-
-1. Clone the repository:
-
-   ```bash
-   git clone https://github.com/rendermani/PR-Analysis.git
-   cd PR-Analysis
-   ```
-
-2. Copy the example environment file and fill in your values:
-
-   ```bash
-   cp .env.example .env
-   # Set GITHUB_TOKEN, and optionally LLM_MODEL, FERNET_KEY, API_AUTH_TOKEN
-   ```
-
-3. Run the preflight check to verify all requirements:
-
-   ```bash
-   make preflight
-   ```
-
-4. Start all services:
-
-   ```bash
-   make up
-   ```
-
-5. Pull the default LLM into Ollama:
-
-   ```bash
-   make run-model
-   ```
-
-6. Open the dashboard at [http://localhost:4096](http://localhost:4096).
-
-To trigger a crawl from the dashboard, enter a repository in `owner/repo` format and click **Start**. The pipeline runs asynchronously; progress streams back via the job status endpoint.
-
-### GPU Acceleration
-
-On NVIDIA Linux hosts, `docker-compose.override.yml` is auto-loaded and passes GPU resources to the Ollama container. On macOS or CPU-only Linux, rename or remove the override file:
+### Common steps (all platforms)
 
 ```bash
-mv docker-compose.override.yml docker-compose.gpu.yml
-docker compose up
+git clone https://github.com/rendermani/PR-Distiller.git
+cd PR-Distiller
+cp .env.example .env           # set GITHUB_TOKEN at minimum
+make preflight                 # detects OS + available accelerators
 ```
+
+### macOS (Apple Silicon)
+
+Docker on Mac cannot access the GPU, so the LLM runs on the host. Ollama on macOS uses Metal and unified memory automatically — full GPU acceleration, no config.
+
+```bash
+brew install ollama            # or download from https://ollama.com
+ollama serve &                 # or launch the Ollama.app
+make run-model                 # pulls qwen2.5-coder:7b-instruct
+make up                        # starts backend + web-ui in Docker
+```
+
+<details>
+<summary>Power user: use MLX instead of Ollama</summary>
+
+MLX is Apple's native ML framework. Sometimes faster on M-series for quantized models, but more setup. Only bother if you're benchmarking.
+
+```bash
+pip install mlx-lm
+make run-mlx                   # terminal 1: starts mlx_lm.server on port 8080
+make up-mac-mlx                # terminal 2
+```
+</details>
+
+### Windows — host Ollama (WSL2 or native)
+
+```powershell
+# Install Ollama from https://ollama.com/download (native Windows installer)
+ollama serve                   # runs in background automatically after install
+make run-model
+make up-mac-ollama             # same target works on Windows — points Docker at host Ollama
+```
+
+> Run `make` inside WSL2 or Git Bash. Docker Desktop must be running.
+
+### Linux + NVIDIA GPU — everything in Docker
+
+```bash
+# Requires NVIDIA Container Toolkit: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/
+make up-linux-gpu              # backend + web-ui + Ollama (GPU) all in Docker
+make run-model
+```
+
+### Linux / any OS — CPU-only fallback
+
+```bash
+make up-cpu                    # backend + web-ui + Ollama (CPU) all in Docker
+make run-model
+```
+
+### Finishing up
+
+Open the dashboard at [http://localhost:4096](http://localhost:4096). Enter a repo in `owner/repo` format and click **Start** to trigger a crawl.
+
+To stop everything: `make down`.
 
 ## Architecture
 
@@ -131,7 +144,7 @@ All configuration is via environment variables. Copy `.env.example` to `.env` be
 |---|---|---|
 | `GITHUB_TOKEN` | — | GitHub PAT with `repo` read access. Required for crawling. |
 | `LLM_MODEL` | `ollama/qwen2.5-coder:7b-instruct` | LiteLLM model string. Supports any LiteLLM provider prefix. |
-| `LLM_API_BASE` | `http://ollama:11434/v1` | OpenAI-compatible base URL for the LLM. |
+| `LLM_API_BASE` | `http://host.docker.internal:11434/v1` | OpenAI-compatible base URL for the LLM. Auto-overridden to `http://ollama:11434/v1` when using the Ollama container overlay. |
 | `LLM_API_KEY` | — | API key for external providers (OpenAI, Anthropic, etc.). |
 | `EMBEDDING_MODEL` | `BAAI/bge-base-en-v1.5` | Sentence-transformer model used for ChromaDB embeddings. |
 | `FERNET_KEY` | — | 32-byte base64 Fernet key for encrypting stored tokens. |
@@ -153,9 +166,9 @@ Add the MCP server to your IDE configuration. The server communicates over stdio
 ```json
 {
   "mcpServers": {
-    "pr-analysis": {
+    "pr-distiller": {
       "command": "docker",
-      "args": ["compose", "-f", "/path/to/PR-Analysis/docker-compose.yml",
+      "args": ["compose", "-f", "/path/to/PR-Distiller/docker-compose.yml",
                "run", "--rm", "mcp-server"],
       "env": { "PR_DISTILLER_API_URL": "http://localhost:8923" }
     }
@@ -168,9 +181,9 @@ Add the MCP server to your IDE configuration. The server communicates over stdio
 ```json
 {
   "mcpServers": {
-    "pr-analysis": {
+    "pr-distiller": {
       "command": "docker",
-      "args": ["compose", "-f", "/path/to/PR-Analysis/docker-compose.yml",
+      "args": ["compose", "-f", "/path/to/PR-Distiller/docker-compose.yml",
                "run", "--rm", "mcp-server"]
     }
   }

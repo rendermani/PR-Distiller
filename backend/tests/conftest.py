@@ -1,5 +1,5 @@
 """
-Shared pytest fixtures for the PR-Analysis backend test suite.
+Shared pytest fixtures for the PR-Distiller backend test suite.
 
 All fixtures here are available automatically to every test file in this directory.
 """

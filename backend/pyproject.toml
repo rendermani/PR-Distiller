@@ -5,7 +5,7 @@ build-backend = "flit_core.buildapi"
 [project]
 name = "agile-rule-extractor-backend"
 version = "0.1.0"
-description = "Backend for PR-Analysis AGILE-RULE-EXTRACTOR"
+description = "Backend for PR-Distiller AGILE-RULE-EXTRACTOR"
 dependencies = [
     "fastapi>=0.100.0",
     "uvicorn>=0.23.0",

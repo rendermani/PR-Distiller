@@ -124,7 +124,7 @@ make lint
 
 ## Reporting Issues
 
-Use [GitHub Issues](https://github.com/your-org/PR-Analysis/issues) with the following structure:
+Use [GitHub Issues](https://github.com/your-org/PR-Distiller/issues) with the following structure:
 
 - **Steps to reproduce** — exact commands or UI actions
 - **Expected behavior** — what should have happened

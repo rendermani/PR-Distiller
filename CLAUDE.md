@@ -1,8 +1,8 @@
-# PR-Analysis — Agent Instructions
+# PR-Distiller — Agent Instructions
 
 ## Project Overview
 
-PR-Analysis extracts reusable coding rules from GitHub PR review comments and serves them to AI coding assistants via MCP (Model Context Protocol). The system uses a two-pass LLM extraction pipeline with semantic deduplication.
+PR-Distiller extracts reusable coding rules from GitHub PR review comments and serves them to AI coding assistants via MCP (Model Context Protocol). The system uses a two-pass LLM extraction pipeline with semantic deduplication.
 
 ## Architecture
 

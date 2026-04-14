@@ -17,7 +17,7 @@ false negatives for synthetic test numbers. Testing that boundary would
 couple the tests to a specific Presidio model version.
 
 Run with:
-    cd /home/mani/Projects/PR-Analysis/backend
+    cd /home/mani/Projects/PR-Distiller/backend
     ./venv/bin/python -m pytest tests/test_security_redactor.py -v --tb=short
 """
 import sys

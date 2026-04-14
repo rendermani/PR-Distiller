@@ -9,7 +9,7 @@ Strategy:
 - Use FastAPI TestClient to send HTTP requests.
 
 Run with:
-    cd /home/mani/Projects/PR-Analysis/backend
+    cd /home/mani/Projects/PR-Distiller/backend
     ./venv/bin/python -m pytest tests/test_api_endpoints.py -v --tb=short
 """
 import sys

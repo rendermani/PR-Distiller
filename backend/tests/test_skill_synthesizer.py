@@ -3,7 +3,7 @@ Unit tests for SkillSynthesizer.generate_cursorrules, generate_claude_md,
 and export() dispatch for those two new format types.
 
 Run with:
-  cd /home/mani/Projects/PR-Analysis/backend
+  cd /home/mani/Projects/PR-Distiller/backend
   ./venv/bin/python -m pytest pipeline/test_skill_synthesizer.py -v
 """
 import sys

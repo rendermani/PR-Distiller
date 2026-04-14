@@ -2,7 +2,7 @@
 
 ## Network Model
 
-PR-Analysis is designed for local development and trusted-network use. The API server binds to `0.0.0.0:8923` by default and has no built-in authentication unless explicitly configured. Do not expose port 8923 to the public internet without enabling authentication and placing the service behind a TLS-terminating reverse proxy.
+PR-Distiller is designed for local development and trusted-network use. The API server binds to `0.0.0.0:8923` by default and has no built-in authentication unless explicitly configured. Do not expose port 8923 to the public internet without enabling authentication and placing the service behind a TLS-terminating reverse proxy.
 
 ## Optional API Authentication
 

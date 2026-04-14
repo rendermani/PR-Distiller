@@ -1,6 +1,6 @@
 # Architecture
 
-PR-Analysis (PR-Distiller) extracts reusable coding rules from GitHub pull request review
+PR-Distiller (PR-Distiller) extracts reusable coding rules from GitHub pull request review
 comments and serves them to IDE agents via the Model Context Protocol (MCP). This document
 describes the system design, data flows, and key decisions.
 
@@ -121,7 +121,7 @@ sequenceDiagram
 ## Directory Structure
 
 ```
-PR-Analysis/
+PR-Distiller/
 ├── backend/
 │   ├── api.py                    # FastAPI application and all route handlers
 │   ├── settings.py               # Env-var configuration (single source of truth)

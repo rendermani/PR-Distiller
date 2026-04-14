@@ -18,6 +18,7 @@ backend/data/code_rag_vectors/
 backend/data/dev_cache/
 backend/data/*.json
 !backend/data/.gitkeep
+data/
 
 # Build artifacts
 dist/

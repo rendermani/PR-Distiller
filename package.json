@@ -1,5 +1,5 @@
 {
-  "name": "pr-analysis-monorepo",
+  "name": "pr-distiller-monorepo",
   "version": "1.0.0",
   "private": true,
   "workspaces": [

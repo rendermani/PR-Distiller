@@ -11,8 +11,8 @@
 **1. Clone the repository**
 
 ```bash
-git clone https://github.com/your-org/PR-Analysis.git
-cd PR-Analysis
+git clone https://github.com/your-org/PR-Distiller.git
+cd PR-Distiller
 ```
 
 **2. Create your environment file**

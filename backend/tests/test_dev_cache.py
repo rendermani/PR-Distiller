@@ -8,7 +8,7 @@ The module exposes CACHE_DIR as a module-level variable; each test patches it
 to a temporary directory via unittest.mock.patch.
 
 Run with:
-    cd /home/mani/Projects/PR-Analysis/backend
+    cd /home/mani/Projects/PR-Distiller/backend
     ./venv/bin/python -m pytest tests/test_dev_cache.py -v --tb=short
 """
 import sys

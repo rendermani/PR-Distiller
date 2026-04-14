@@ -2,7 +2,7 @@
 
 ## What is MCP?
 
-The [Model Context Protocol](https://modelcontextprotocol.io/) is an open standard that allows AI coding assistants (Cursor, Claude Code, GitHub Copilot, and others) to query external tools during a conversation. PR-Analysis exposes an MCP server that surfaces coding rules extracted from your team's PR history directly into the IDE as the assistant is generating code.
+The [Model Context Protocol](https://modelcontextprotocol.io/) is an open standard that allows AI coding assistants (Cursor, Claude Code, GitHub Copilot, and others) to query external tools during a conversation. PR-Distiller exposes an MCP server that surfaces coding rules extracted from your team's PR history directly into the IDE as the assistant is generating code.
 
 ## Available Tools
 
@@ -56,9 +56,9 @@ Add to `.cursor/mcp.json` in your project root (create if it does not exist):
 ```json
 {
   "mcpServers": {
-    "pr-analysis": {
+    "pr-distiller": {
       "command": "node",
-      "args": ["/absolute/path/to/PR-Analysis/mcp-server/dist/index.js"],
+      "args": ["/absolute/path/to/PR-Distiller/mcp-server/dist/index.js"],
       "env": {
         "PR_DISTILLER_API_URL": "http://localhost:8923"
       }
@@ -72,9 +72,9 @@ Restart Cursor. The `query_architectural_constraints` and `report_rule_feedback`
 ## Setup with Claude Code
 
 ```bash
-claude mcp add pr-analysis \
+claude mcp add pr-distiller \
   --command "node" \
-  --args "/absolute/path/to/PR-Analysis/mcp-server/dist/index.js" \
+  --args "/absolute/path/to/PR-Distiller/mcp-server/dist/index.js" \
   --env "PR_DISTILLER_API_URL=http://localhost:8923"
 ```
 
@@ -83,9 +83,9 @@ Or add manually to `~/.claude/claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
-    "pr-analysis": {
+    "pr-distiller": {
       "command": "node",
-      "args": ["/absolute/path/to/PR-Analysis/mcp-server/dist/index.js"],
+      "args": ["/absolute/path/to/PR-Distiller/mcp-server/dist/index.js"],
       "env": {
         "PR_DISTILLER_API_URL": "http://localhost:8923"
       }

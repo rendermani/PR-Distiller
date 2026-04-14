@@ -7,7 +7,7 @@
 Rules are reusable coding constraints extracted from pull request review comments. When a
 reviewer writes "don't use raw SQL here — use the ORM to prevent injection" or "this will cause
 an N+1 query in production", they are implicitly stating a constraint that should apply to all
-future code in that repository. PR-Analysis captures these constraints automatically and makes
+future code in that repository. PR-Distiller captures these constraints automatically and makes
 them queryable by IDE agents so they can be enforced before a PR is even opened.
 
 Rules are scoped to a repository, optionally restricted to specific file paths, and carry a

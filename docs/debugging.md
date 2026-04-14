@@ -140,6 +140,6 @@ make clean
 
 # Or remove only the backend data volume, preserving Ollama models
 docker compose down
-docker volume rm pr-analysis_backend_data
+docker volume rm pr-distiller_backend_data
 docker compose up -d
 ```

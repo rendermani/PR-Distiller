@@ -1,6 +1,6 @@
 # LLM Providers
 
-PR-Analysis uses [litellm](https://docs.litellm.ai/) as its LLM abstraction layer. This means
+PR-Distiller uses [litellm](https://docs.litellm.ai/) as its LLM abstraction layer. This means
 any provider litellm supports can be used by setting `LLM_API_BASE`, `LLM_MODEL`, and
 `LLM_API_KEY` — either as environment variables or through the web UI Settings panel.
 

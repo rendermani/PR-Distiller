@@ -8,7 +8,7 @@ Tests verify:
 - Type conversions: API_PORT is int, float fields are float.
 
 Run with:
-    cd /home/mani/Projects/PR-Analysis/backend
+    cd /home/mani/Projects/PR-Distiller/backend
     ./venv/bin/python -m pytest tests/test_settings.py -v --tb=short
 """
 import sys

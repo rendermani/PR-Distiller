@@ -1,6 +1,6 @@
 # Configuration
 
-PR-Analysis is configured through two complementary mechanisms: environment variables (read at
+PR-Distiller is configured through two complementary mechanisms: environment variables (read at
 startup by `backend/settings.py`) and a persistent JSON file (`backend/data/config.json`)
 managed by `ConfigManager`. Environment variables establish the baseline; `config.json` stores
 runtime overrides and encrypted secrets set through the web UI.
