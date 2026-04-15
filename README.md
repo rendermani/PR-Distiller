@@ -69,7 +69,7 @@ Docker on Mac cannot access the GPU, so the LLM runs on the host. Ollama on macO
 ```bash
 brew install ollama            # or download from https://ollama.com
 ollama serve &                 # or launch the Ollama.app
-make run-model                 # pulls qwen2.5-coder:7b-instruct
+make run-model                 # pulls qwen3:8b (~5.2GB)
 make up                        # starts backend + web-ui in Docker
 ```
 
@@ -131,7 +131,7 @@ All configuration is via environment variables. Copy `.env.example` to `.env` be
 | Variable | Default | Description |
 |---|---|---|
 | `GITHUB_TOKEN` | — | GitHub PAT with `repo` read access. Required for crawling. |
-| `LLM_MODEL` | `ollama/qwen2.5-coder:7b-instruct` | LiteLLM model string. Supports any LiteLLM provider prefix. |
+| `LLM_MODEL` | `ollama/qwen3:8b` | LiteLLM model string. Must include provider prefix (`ollama/`, `openai/`, `anthropic/`, etc.). |
 | `LLM_API_BASE` | `http://host.docker.internal:11434/v1` | OpenAI-compatible base URL for the LLM. Auto-overridden to `http://ollama:11434/v1` when using the Ollama container overlay. |
 | `LLM_API_KEY` | — | API key for external providers (OpenAI, Anthropic, etc.). |
 | `EMBEDDING_MODEL` | `BAAI/bge-base-en-v1.5` | Sentence-transformer model used for ChromaDB embeddings. |
@@ -185,7 +185,7 @@ The server exposes one tool: `query_architectural_constraints`. Pass the active 
 - **Backend**: Python 3.11, FastAPI, ChromaDB, LiteLLM, Presidio, tree-sitter
 - **Frontend**: Next.js 14, React, Tailwind CSS
 - **MCP Server**: TypeScript, `@modelcontextprotocol/sdk`, Zod
-- **LLM (default)**: Ollama with `qwen2.5-coder:7b-instruct`; supports vLLM, OpenAI, Anthropic, Google Gemini, OpenRouter via LiteLLM
+- **LLM (default)**: Ollama with `qwen3:8b` (~5.2GB); supports larger Qwen3/Qwen3-Coder/Gemma 4/Llama 4 and vLLM, OpenAI, Anthropic, Google Gemini, OpenRouter via LiteLLM
 - **Embeddings**: `BAAI/bge-base-en-v1.5` (sentence-transformers, runs locally in the backend container)
 - **AST parsing**: tree-sitter grammars for Python, TypeScript, JavaScript, Go, Rust
 - **Containerization**: Docker Compose with optional NVIDIA GPU override

@@ -40,7 +40,7 @@ def _make_conf_mock(config: dict = None):
         "llm_api_key": "",
         "llm_provider": "ollama",
         "llm_api_base": "http://localhost:11434/v1",
-        "llm_model": "ollama/qwen2.5-coder:7b-instruct",
+        "llm_model": "ollama/qwen3:8b",
         "embedding_model": "BAAI/bge-base-en-v1.5",
         "repos": {},
         "provider_models": {},

@@ -9,7 +9,7 @@ import os
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "ollama")
 LLM_API_BASE = os.environ.get("LLM_API_BASE", "http://localhost:11434/v1")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
-LLM_MODEL = os.environ.get("LLM_MODEL", "ollama/qwen2.5-coder:7b-instruct")
+LLM_MODEL = os.environ.get("LLM_MODEL", "ollama/qwen3:8b")
 
 # --- Embedding ---
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")

@@ -122,9 +122,10 @@ class TestGetPrComments(unittest.TestCase):
         self.assertEqual(result, [])
 
     def test_raises_on_http_401(self):
+        from pipeline.github_client import GitHubAuthError
         mock_response = _make_response(401)
         with patch("requests.get", return_value=mock_response):
-            with self.assertRaises(requests.HTTPError):
+            with self.assertRaises(GitHubAuthError):
                 self.client.get_pr_comments(OWNER, REPO, PR_NUMBER)
 
 

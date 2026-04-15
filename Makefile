@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-MODEL ?= qwen2.5-coder:7b-instruct
+MODEL ?= qwen3:8b
 SHELL := /bin/bash
 
 # Compose file combinations
@@ -59,7 +59,7 @@ _print-urls:
 
 ## —— LLM Model ————————————————————————————————————————————
 
-run-model: ## Pull the default LLM (host Ollama). MODEL=qwen2.5-coder:7b-instruct
+run-model: ## Pull the default LLM (host Ollama). MODEL=qwen3:8b
 	@if curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then \
 		printf "$(CYAN)Pulling $(MODEL) into host Ollama...$(RESET)\n"; \
 		ollama pull $(MODEL); \

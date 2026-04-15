@@ -41,7 +41,7 @@ export default function Home() {
 
   // Global Config
   const [config, setConfig] = useState<any>({
-    github_token: "", llm_provider: "ollama", llm_api_base: "http://localhost:11434/v1", llm_model: "ollama/qwen2.5-coder:7b-instruct", llm_api_key: "", repos: {}, provider_models: {}
+    github_token: "", llm_provider: "ollama", llm_api_base: "http://localhost:11434/v1", llm_model: "ollama/qwen3:8b", llm_api_key: "", repos: {}, provider_models: {}
   });
 
   // Treat "local" (old) and "ollama" as the same provider so URL-vs-API-key

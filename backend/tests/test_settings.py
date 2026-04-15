@@ -57,7 +57,7 @@ class TestSettingsDefaults(unittest.TestCase):
         self.assertEqual(self._settings.LLM_API_KEY, "")
 
     def test_llm_model_default(self):
-        self.assertEqual(self._settings.LLM_MODEL, "ollama/qwen2.5-coder:7b-instruct")
+        self.assertEqual(self._settings.LLM_MODEL, "ollama/qwen3:8b")
 
     def test_embedding_model_default(self):
         self.assertEqual(self._settings.EMBEDDING_MODEL, "BAAI/bge-base-en-v1.5")
