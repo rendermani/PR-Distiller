@@ -96,6 +96,59 @@ class TestConfigEndpoints(unittest.TestCase):
         api.conf_manager.save_config.assert_called_once_with({"llm_model": "updated"})
 
 
+class TestHealthEndpoints(unittest.TestCase):
+    def setUp(self):
+        api.db = _make_db_mock()
+        api.conf_manager = _make_conf_mock()
+        api.orchestrator = _make_orchestrator_mock()
+        self.client = TestClient(api.app)
+
+    @patch("pipeline.github_client.requests.get")
+    def test_validate_github_token_valid(self, mock_get):
+        mock_resp = MagicMock(status_code=200)
+        mock_resp.json.return_value = {"login": "octocat"}
+        mock_resp.headers = {"X-OAuth-Scopes": "repo, read:user"}
+        mock_get.return_value = mock_resp
+        r = self.client.post("/api/github/validate", json={"token": "ghp_abc"})
+        body = r.json()
+        self.assertTrue(body["valid"])
+        self.assertEqual(body["login"], "octocat")
+        self.assertIn("repo", body["scopes"])
+
+    @patch("pipeline.github_client.requests.get")
+    def test_validate_github_token_401(self, mock_get):
+        mock_resp = MagicMock(status_code=401)
+        mock_resp.json.return_value = {"message": "Bad credentials"}
+        mock_get.return_value = mock_resp
+        r = self.client.post("/api/github/validate", json={"token": "ghp_bad"})
+        body = r.json()
+        self.assertFalse(body["valid"])
+        self.assertIn("401", body["error"])
+
+    def test_validate_github_token_empty(self):
+        api.conf_manager = _make_conf_mock(config={"github_token": ""})
+        r = self.client.post("/api/github/validate", json={"token": ""})
+        body = r.json()
+        self.assertFalse(body["valid"])
+        self.assertIn("No token", body["error"])
+
+    @patch("api._requests" if False else "requests.get")  # patch requests.get
+    def test_llm_health_reachable(self, mock_get):
+        mock_get.return_value = MagicMock(status_code=200)
+        r = self.client.get("/api/health/llm")
+        body = r.json()
+        self.assertTrue(body["reachable"])
+
+    @patch("requests.get")
+    def test_llm_health_unreachable(self, mock_get):
+        import requests as _r
+        mock_get.side_effect = _r.ConnectionError("refused")
+        r = self.client.get("/api/health/llm")
+        body = r.json()
+        self.assertFalse(body["reachable"])
+        self.assertIn("Could not reach", body["error"])
+
+
 class TestRulesEndpoints(unittest.TestCase):
     def setUp(self):
         api.db = _make_db_mock()

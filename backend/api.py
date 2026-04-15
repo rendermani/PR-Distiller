@@ -121,6 +121,61 @@ def _redact_sensitive_fields(config: dict) -> dict:
     return redacted
 
 
+class TokenValidateRequest(BaseModel):
+    token: str | None = None
+
+
+@app.post("/api/github/validate")
+def validate_github_token(req: TokenValidateRequest):
+    """Validate a GitHub token against the GitHub API.
+
+    If no token is provided in the request, falls back to the currently saved one.
+    Never echoes the token back. Returns {valid, login?, scopes?, error?}.
+    """
+    from pipeline.github_client import GitHubClient
+
+    token = (req.token or "").strip()
+    if not token:
+        token = conf_manager.load_config().get("github_token", "") or settings.GITHUB_TOKEN
+    return GitHubClient(token=token or None).validate_token()
+
+
+@app.get("/api/health/llm")
+def check_llm_health():
+    """Reach the configured LLM_API_BASE to tell the UI whether inference will work.
+
+    Returns {reachable, api_base, provider_hint, error?}.
+    """
+    import requests as _requests
+
+    cfg = conf_manager.load_config()
+    api_base = (cfg.get("llm_api_base") or settings.LLM_API_BASE or "").rstrip("/")
+    if not api_base:
+        return {"reachable": False, "api_base": "", "error": "No LLM_API_BASE configured."}
+
+    # Heuristic: Ollama exposes /api/tags outside the OpenAI-compat prefix;
+    # fall back to /models for OpenAI-compatible servers.
+    probes = []
+    if api_base.endswith("/v1"):
+        probes.append(api_base[:-3] + "/api/tags")
+    probes.append(api_base + "/models")
+
+    hint = "ollama" if ":11434" in api_base else "openai-compatible"
+    for url in probes:
+        try:
+            r = _requests.get(url, timeout=3)
+            if r.status_code < 500:
+                return {"reachable": True, "api_base": api_base, "provider_hint": hint}
+        except _requests.RequestException:
+            continue
+    return {
+        "reachable": False,
+        "api_base": api_base,
+        "provider_hint": hint,
+        "error": f"Could not reach {api_base}. Is the LLM server running?",
+    }
+
+
 @app.get("/api/config")
 def get_config():
     """Serves the Unified JSON configurations to the Next.js UI Settings panel."""

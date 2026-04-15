@@ -49,6 +49,33 @@ export default function Home() {
   const [isCustomModel, setIsCustomModel] = useState(false);
   const [customModelString, setCustomModelString] = useState("");
 
+  // Error-handling state
+  const [tokenStatus, setTokenStatus] = useState<{state: "idle" | "checking" | "valid" | "invalid"; message?: string; login?: string; scopes?: string[]}>({state: "idle"});
+  const [llmHealth, setLlmHealth] = useState<{reachable: boolean; api_base?: string; error?: string} | null>(null);
+  const [bannerDismissed, setBannerDismissed] = useState(false);
+
+  const detectOS = (): "mac" | "windows" | "linux" | "other" => {
+    if (typeof navigator === "undefined") return "other";
+    const ua = navigator.userAgent.toLowerCase();
+    if (ua.includes("mac")) return "mac";
+    if (ua.includes("win")) return "windows";
+    if (ua.includes("linux")) return "linux";
+    return "other";
+  };
+
+  const ollamaInstructions = (os: string): {command: string; hint: string} => {
+    switch (os) {
+      case "mac":
+        return {command: "brew install ollama && ollama serve", hint: "or launch the Ollama.app from Applications"};
+      case "windows":
+        return {command: "winget install Ollama.Ollama", hint: "then run 'ollama serve' or launch the Ollama app from the Start menu"};
+      case "linux":
+        return {command: "curl -fsSL https://ollama.com/install.sh | sh && ollama serve", hint: "or: systemctl --user start ollama"};
+      default:
+        return {command: "See https://ollama.com/download", hint: "Install Ollama for your OS, then start the server"};
+    }
+  };
+
   // Load Loop
   useEffect(() => {
     fetch(`${API_URL}/api/config`).then(r => r.json()).then(data => {
@@ -94,6 +121,48 @@ export default function Home() {
       setCacheInfo(null);
     }
   }, [selectedRepo]);
+
+  // LLM health — poll every 20s. Used to show a top-of-page banner when unreachable.
+  useEffect(() => {
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const r = await fetch(`${API_URL}/api/health/llm`);
+        const d = await r.json();
+        if (!cancelled) setLlmHealth(d);
+      } catch {
+        if (!cancelled) setLlmHealth({reachable: false, error: "Backend unreachable"});
+      }
+    };
+    check();
+    const t = setInterval(check, 20000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, []);
+
+  // GitHub token validator — debounced on value change.
+  useEffect(() => {
+    const token = config.github_token;
+    if (!token || token === "***") { setTokenStatus({state: "idle"}); return; }
+    setTokenStatus({state: "checking"});
+    const handle = setTimeout(async () => {
+      try {
+        const r = await fetch(`${API_URL}/api/github/validate`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({token}),
+        });
+        const d = await r.json();
+        if (d.valid) {
+          setTokenStatus({state: "valid", login: d.login, scopes: d.scopes});
+        } else {
+          setTokenStatus({state: "invalid", message: d.error});
+        }
+      } catch (e: any) {
+        setTokenStatus({state: "invalid", message: "Could not reach backend."});
+      }
+    }, 600);
+    return () => clearTimeout(handle);
+  }, [config.github_token]);
 
   // Telemetry Polling
   useEffect(() => {
@@ -250,8 +319,29 @@ export default function Home() {
     return "Custom Provider API Key";
   };
 
+  const llmBannerVisible = llmHealth && !llmHealth.reachable && !bannerDismissed;
+  const os = detectOS();
+  const instructions = ollamaInstructions(os);
+
   return (
     <main className="min-h-screen bg-[#0A0A0A] text-white p-8 selection:bg-purple-500/30 font-sans flex flex-col md:flex-row gap-8 relative overflow-hidden">
+
+      {/* LLM HEALTH BANNER */}
+      {llmBannerVisible && (
+        <div className="fixed top-0 left-0 right-0 z-40 bg-amber-500/10 border-b border-amber-500/30 backdrop-blur-md px-6 py-3 flex items-start gap-4">
+          <div className="flex-1">
+            <div className="text-sm font-semibold text-amber-300 mb-1">
+              LLM server unreachable at {llmHealth!.api_base || "configured endpoint"}
+            </div>
+            <div className="text-xs text-amber-200/80 mb-2">
+              {llmHealth!.error || "Inference will fail until the server is running."} Start it for your OS ({os}):
+            </div>
+            <code className="block bg-black/50 px-3 py-1.5 rounded text-xs font-mono text-amber-100 select-all">{instructions.command}</code>
+            <div className="text-xs text-amber-200/60 mt-1">{instructions.hint}</div>
+          </div>
+          <button onClick={() => setBannerDismissed(true)} className="text-amber-300/60 hover:text-amber-300 text-sm" aria-label="Dismiss">✕</button>
+        </div>
+      )}
 
       {/* LEFT SIDEBAR: CONTROL CENTER */}
       <div className="w-full md:w-96 flex flex-col gap-6 flex-shrink-0 relative z-10">
@@ -513,7 +603,31 @@ export default function Home() {
             <form onSubmit={handleSaveConfig} className="flex flex-col gap-6">
               <div>
                 <label className="text-xs text-neutral-400 uppercase tracking-widest mb-2 block">GitHub Auth Token (.env Bypass)</label>
-                <input value={config.github_token} onChange={e => setConfig({ ...config, github_token: e.target.value })} type="password" placeholder="ghp_xxx..." className="w-full bg-black/80 border border-white/10 rounded-lg p-3 text-sm focus:border-purple-500 outline-none text-white shadow-inner" />
+                <input
+                  value={config.github_token}
+                  onChange={e => setConfig({ ...config, github_token: e.target.value })}
+                  type="password"
+                  placeholder="ghp_xxx..."
+                  className={`w-full bg-black/80 border rounded-lg p-3 text-sm outline-none text-white shadow-inner ${
+                    tokenStatus.state === "valid" ? "border-green-500/60 focus:border-green-500"
+                    : tokenStatus.state === "invalid" ? "border-red-500/60 focus:border-red-500"
+                    : "border-white/10 focus:border-purple-500"
+                  }`}
+                />
+                {tokenStatus.state === "checking" && (
+                  <div className="text-xs text-neutral-400 mt-2">Validating…</div>
+                )}
+                {tokenStatus.state === "valid" && (
+                  <div className="text-xs text-green-400 mt-2">
+                    ✓ Valid — authenticated as <span className="font-mono">{tokenStatus.login}</span>
+                    {tokenStatus.scopes && tokenStatus.scopes.length > 0 && (
+                      <span className="text-neutral-500"> · scopes: {tokenStatus.scopes.join(", ")}</span>
+                    )}
+                  </div>
+                )}
+                {tokenStatus.state === "invalid" && (
+                  <div className="text-xs text-red-400 mt-2">✗ {tokenStatus.message}</div>
+                )}
               </div>
 
               <div className="border border-white/10 p-6 rounded-xl bg-black/30 shadow-inner">
