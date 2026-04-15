@@ -41,8 +41,12 @@ export default function Home() {
 
   // Global Config
   const [config, setConfig] = useState<any>({
-    github_token: "", llm_provider: "local", llm_api_base: "http://localhost:11434/v1", llm_model: "openai/Qwen/Qwen3.5-Coder-7B-Instruct", llm_api_key: "", repos: {}, provider_models: {}
+    github_token: "", llm_provider: "ollama", llm_api_base: "http://localhost:11434/v1", llm_model: "ollama/qwen2.5-coder:7b-instruct", llm_api_key: "", repos: {}, provider_models: {}
   });
+
+  // Treat "local" (old) and "ollama" as the same provider so URL-vs-API-key
+  // conditional rendering works for both existing saved configs and new ones.
+  const isLocalProvider = (p: string) => p === "ollama" || p === "local";
 
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8923';
 
@@ -87,7 +91,9 @@ export default function Home() {
         setThreshold(data.repos[firstRepo].threshold || 0.45);
       }
 
-      const providerStr = data.llm_provider || "local";
+      // Normalize legacy "local" to "ollama" so the dropdown has a matching option.
+      const rawProvider = data.llm_provider || "ollama";
+      const providerStr = rawProvider === "local" ? "ollama" : rawProvider;
       const providerMap = data.provider_models?.[providerStr] || [];
       const isStandard = providerMap.some((m: any) => m.id === data.llm_model);
 
@@ -647,7 +653,7 @@ export default function Home() {
                     }}
                     className="w-full bg-black/50 border border-white/10 rounded-lg p-3 text-sm text-white outline-none cursor-pointer focus:border-purple-500"
                   >
-                    <option value="local">Local Hardware (Ollama / vLLM)</option>
+                    <option value="ollama">Local Hardware (Ollama / vLLM)</option>
                     <option value="openai">OpenAI Architecture</option>
                     <option value="google">Google Cloud Platform</option>
                     <option value="anthropic">Anthropic Edge</option>
@@ -686,7 +692,7 @@ export default function Home() {
                 </div>
 
                 {/* Conditional URL Field for Local Mode */}
-                {config.llm_provider === "local" && (
+                {isLocalProvider(config.llm_provider) && (
                   <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }}>
                     <label className="text-xs text-neutral-500 uppercase tracking-widest mb-2 block">3. Local Engine Base URL</label>
                     <input value={config.llm_api_base} onChange={e => setConfig({ ...config, llm_api_base: e.target.value })} placeholder="http://localhost:11434/v1" className="w-full bg-black/80 border border-white/10 rounded-lg p-3 text-sm font-mono text-neutral-300 outline-none focus:border-purple-500 shadow-inner" />
@@ -694,7 +700,7 @@ export default function Home() {
                 )}
 
                 {/* Conditional API Key Field for Online Providers */}
-                {config.llm_provider !== "local" && (
+                {!isLocalProvider(config.llm_provider) && (
                   <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }}>
                     <label className="text-xs text-amber-500/80 uppercase tracking-widest mb-2 block flex items-center gap-2">
                       <span>🔒</span> {getApiKeyLabel()} (Symmetrically Encrypted)
