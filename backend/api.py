@@ -188,7 +188,7 @@ class ConfigUpdate(BaseModel):
 def _redact_sensitive_fields(config: dict) -> dict:
     """Return a copy of config with sensitive secrets replaced by '***' or ''."""
     redacted = dict(config)
-    for field in ("github_token", "llm_api_key"):
+    for field in ("github_token", "llm_api_key", "github_webhook_secret", "huggingface_token"):
         redacted[field] = "***" if config.get(field) else ""
     provider_keys = config.get("provider_api_keys", {})
     redacted["provider_api_keys"] = {p: "***" if k else "" for p, k in provider_keys.items()}
@@ -315,7 +315,7 @@ def check_llm_health():
     }
 
 
-@app.get("/api/config")
+@app.get("/api/config", dependencies=[Depends(require_api_token)])
 def get_config(request: Request):
     """Serves the Unified JSON configurations to the Next.js UI Settings panel.
 

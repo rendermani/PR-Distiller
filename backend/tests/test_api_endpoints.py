@@ -128,6 +128,25 @@ class TestConfigEndpoints(unittest.TestCase):
         self.assertEqual(body["provider_api_keys"]["openai"], "***")
         self.assertEqual(body["provider_api_keys"]["anthropic"], "")
 
+    def test_get_config_redacts_huggingface_and_webhook_secrets(self):
+        api.conf_manager = _make_conf_mock(config={
+            "huggingface_token": "hf_real_secret",
+            "github_webhook_secret": "wh_real_secret",
+        })
+        self.client = TestClient(api.app)
+        r = self.client.get("/api/config")
+        body = r.json()
+        self.assertNotEqual(body.get("huggingface_token"), "hf_real_secret")
+        self.assertNotEqual(body.get("github_webhook_secret"), "wh_real_secret")
+        # Either redaction sentinel or empty string — matching existing convention.
+        self.assertIn(body.get("huggingface_token"), ("***", "", None))
+        self.assertIn(body.get("github_webhook_secret"), ("***", "", None))
+
+    def test_get_config_requires_auth_when_token_set(self):
+        with patch.object(api.settings, "API_AUTH_TOKEN", "secret"):
+            r = self.client.get("/api/config")
+        self.assertEqual(r.status_code, 401)
+
 
 class TestHealthEndpoints(unittest.TestCase):
     def setUp(self):
