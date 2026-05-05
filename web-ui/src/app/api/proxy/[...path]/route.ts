@@ -85,6 +85,10 @@ const HOP_BY_HOP = new Set([
   "content-length",
 ]);
 
+// Pass-through note: SSE responses (text/event-stream) require the upstream
+// Cache-Control: no-cache and X-Accel-Buffering: no headers to flow through
+// untouched. We don't add or rewrite cache-control on responses; HOP_BY_HOP
+// excludes neither header. Verified by manual smoke test in dev.
 async function executeUpstream(
   targetUrl: string,
   method: string,
