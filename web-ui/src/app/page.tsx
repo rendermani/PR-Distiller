@@ -74,6 +74,13 @@ export default function Home() {
   const apiFetch = (path: string, init: RequestInit = {}) =>
     fetch(`/api/proxy${path.startsWith('/') ? path : `/${path}`}`, init);
 
+  const formatBytes = (n: number): string => {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+    return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  };
+
   const [isCustomModel, setIsCustomModel] = useState(false);
   const [customModelString, setCustomModelString] = useState("");
 
@@ -409,6 +416,52 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-[#0A0A0A] text-white p-8 selection:bg-purple-500/30 font-sans flex flex-col md:flex-row gap-8 relative overflow-hidden">
+
+      {/* EMBEDDING STATUS BANNER */}
+      {systemStatus.embedding.state !== "ready" && (
+        <div className="fixed top-0 left-0 right-0 z-50 w-full bg-purple-500/10 border-b border-purple-500/30 backdrop-blur-md px-6 py-3">
+          {systemStatus.embedding.state === "downloading" && (
+            <>
+              <div className="text-xs text-purple-200 mb-2 flex justify-between">
+                <span>
+                  Downloading embedding model: <span className="font-mono">{systemStatus.embedding.model_name}</span> ·{" "}
+                  {formatBytes(systemStatus.embedding.bytes_downloaded)} /{" "}
+                  {systemStatus.embedding.bytes_total > 0 ? formatBytes(systemStatus.embedding.bytes_total) : "…"}
+                </span>
+                <span>
+                  {systemStatus.embedding.bytes_total > 0
+                    ? `${Math.floor(100 * systemStatus.embedding.bytes_downloaded / systemStatus.embedding.bytes_total)}%`
+                    : ""}
+                </span>
+              </div>
+              <div className="h-2 bg-black/40 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-gradient-to-r from-purple-600 to-purple-400 transition-all"
+                  style={{ width: `${systemStatus.embedding.bytes_total > 0 ? Math.max(2, 100 * systemStatus.embedding.bytes_downloaded / systemStatus.embedding.bytes_total) : 2}%` }}
+                />
+              </div>
+            </>
+          )}
+          {systemStatus.embedding.state === "loading" && (
+            <div className="text-xs text-purple-200 animate-pulse">
+              Loading model weights into memory…
+            </div>
+          )}
+          {systemStatus.embedding.state === "error" && (
+            <div className="flex justify-between items-center">
+              <span className="text-sm text-red-300">
+                Embedding load failed: {systemStatus.embedding.error}
+              </span>
+              <button
+                onClick={() => apiFetch("/api/system/embedding/retry", { method: "POST" })}
+                className="text-xs bg-red-500/20 border border-red-500/40 px-3 py-1 rounded-full hover:bg-red-500 hover:text-white"
+              >
+                Retry
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* LLM HEALTH BANNER */}
       {llmBannerVisible && (
