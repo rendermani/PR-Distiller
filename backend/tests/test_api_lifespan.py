@@ -318,5 +318,41 @@ class TestLifespanHook(unittest.IsolatedAsyncioTestCase):
         mock_start.assert_called_once_with()
 
 
+class TestStartBackgroundLoadIdempotency(unittest.TestCase):
+    """_start_background_embedding_load must be idempotent while a thread is alive."""
+
+    def setUp(self):
+        # Reset loader-thread state before each test so tests are isolated.
+        api._loader_thread = None
+
+    def tearDown(self):
+        # Clean up any live thread we started so it doesn't bleed into later tests.
+        api._loader_thread = None
+
+    def test_second_call_while_thread_alive_is_noop(self):
+        """A second call while the loader thread is still alive must not spawn a new thread."""
+        import time
+        with patch("api._runner", side_effect=lambda: time.sleep(0.5)):
+            api._start_background_embedding_load()
+            first = api._loader_thread
+            self.assertIsNotNone(first)
+            api._start_background_embedding_load()
+            second = api._loader_thread
+            self.assertIs(first, second, "second call must not spawn a new thread")
+            first.join(timeout=2.0)
+
+    def test_third_call_after_thread_finished_spawns_new_one(self):
+        """A call after the previous loader thread has finished must spawn a fresh thread."""
+        with patch("api._runner", new=lambda: None):
+            api._start_background_embedding_load()
+            first = api._loader_thread
+            first.join(timeout=2.0)
+            self.assertFalse(first.is_alive())
+            api._start_background_embedding_load()
+            second = api._loader_thread
+            self.assertIsNot(first, second, "after first finished, a new thread should spawn")
+            second.join(timeout=2.0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -43,30 +43,58 @@ def _wipe_hf_cache() -> None:
         shutil.rmtree(_HF_CACHE_DIR, ignore_errors=True)
 
 
+_loader_thread_lock = threading.Lock()
+_loader_thread: threading.Thread | None = None
+
+
+def _runner() -> None:
+    """Background work executed by the embedding-loader thread.
+
+    Transitions SYSTEM_STATUS through downloading -> loading -> ready.
+    On failure, transitions to error with the exception class and message.
+    Promoted to module level so it is patchable in tests and so the Thread
+    target reference remains valid across calls.
+    """
+    SYSTEM_STATUS.update(
+        state="downloading",
+        model_name=settings.EMBEDDING_MODEL,
+        error=None,
+    )
+    try:
+        with capture_hf_progress():
+            real_db = LightRAGManager()
+        SYSTEM_STATUS.update(state="loading")
+        # Defensive guard: if a concurrent caller somehow already bound the
+        # proxy (should not happen given the lock in
+        # _start_background_embedding_load, but protects manual bind() calls
+        # made from tests or future code paths), absorb the error rather than
+        # transitioning to state=error despite the system being operational.
+        try:
+            db.bind(real_db)
+        except RuntimeError:
+            pass
+        SYSTEM_STATUS.update(state="ready")
+    except Exception as exc:
+        SYSTEM_STATUS.update(state="error", error=f"{type(exc).__name__}: {exc}")
+        logger.exception("Embedding model load failed")
+
+
 def _start_background_embedding_load() -> None:
     """Spawn the bg thread that downloads + loads the embedding model.
 
+    Idempotent: if a loader thread is still alive, this is a no-op.
     The thread updates SYSTEM_STATUS state through downloading -> loading -> ready.
     On failure it sets state="error" with the exception class+message.
     Returns immediately; the caller must not await or join the thread.
     """
-    def _runner() -> None:
-        SYSTEM_STATUS.update(
-            state="downloading",
-            model_name=settings.EMBEDDING_MODEL,
-            error=None,
+    global _loader_thread
+    with _loader_thread_lock:
+        if _loader_thread is not None and _loader_thread.is_alive():
+            return
+        _loader_thread = threading.Thread(
+            target=_runner, daemon=True, name="embedding-loader"
         )
-        try:
-            with capture_hf_progress():
-                real_db = LightRAGManager()
-            SYSTEM_STATUS.update(state="loading")
-            db.bind(real_db)
-            SYSTEM_STATUS.update(state="ready")
-        except Exception as exc:
-            SYSTEM_STATUS.update(state="error", error=f"{type(exc).__name__}: {exc}")
-            logger.exception("Embedding model load failed")
-
-    threading.Thread(target=_runner, daemon=True, name="embedding-loader").start()
+        _loader_thread.start()
 
 
 def _embedding_load_starter() -> None:
