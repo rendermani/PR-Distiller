@@ -677,6 +677,12 @@ export default function Home() {
               </div>
             ) : (
               <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} className="flex flex-col items-center max-w-md w-full">
+                {jobStatus.startsWith("Queued") && (
+                  <div className="text-amber-400 text-sm flex items-center gap-2 mb-3">
+                    <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
+                    {jobStatus}
+                  </div>
+                )}
                 {jobProgress === 100 ? (
                   <div className="h-16 w-16 rounded-full bg-green-500/20 border border-green-500 flex items-center justify-center mb-8 text-2xl">✓</div>
                 ) : jobProgress === -1 ? (
