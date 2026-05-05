@@ -6,8 +6,10 @@ import logging
 import os
 import shutil
 import sys
+import threading
 import time
 import uvicorn
+from contextlib import asynccontextmanager
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -16,7 +18,10 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
+from auth import ensure_api_token
 from db.lightrag_manager import LightRAGManager
+from db_proxy import LazyDbProxy
+from embedding_loader import capture_hf_progress
 from pipeline.config_manager import ConfigManager
 from pipeline.job_orchestrator import JobOrchestrator
 from pipeline import dev_cache
@@ -38,11 +43,47 @@ def _wipe_hf_cache() -> None:
         shutil.rmtree(_HF_CACHE_DIR, ignore_errors=True)
 
 
-def _embedding_load_starter() -> None:
-    """Spawn the background embedding-load thread. Implemented in Task 13."""
-    raise NotImplementedError("set in startup hook")
+def _start_background_embedding_load() -> None:
+    """Spawn the bg thread that downloads + loads the embedding model.
 
-app = FastAPI(title="PR-Distiller Knowledge API")
+    The thread updates SYSTEM_STATUS state through downloading -> loading -> ready.
+    On failure it sets state="error" with the exception class+message.
+    Returns immediately; the caller must not await or join the thread.
+    """
+    def _runner() -> None:
+        SYSTEM_STATUS.update(
+            state="downloading",
+            model_name=settings.EMBEDDING_MODEL,
+            error=None,
+        )
+        try:
+            with capture_hf_progress():
+                real_db = LightRAGManager()
+            SYSTEM_STATUS.update(state="loading")
+            db.bind(real_db)
+            SYSTEM_STATUS.update(state="ready")
+        except Exception as exc:
+            SYSTEM_STATUS.update(state="error", error=f"{type(exc).__name__}: {exc}")
+            logger.exception("Embedding model load failed")
+
+    threading.Thread(target=_runner, daemon=True, name="embedding-loader").start()
+
+
+def _embedding_load_starter() -> None:
+    """Retry entry point: spawns the background embedding-load thread."""
+    _start_background_embedding_load()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """FastAPI lifespan: wire the event loop, resolve auth token, start loader."""
+    SYSTEM_STATUS.attach_loop(asyncio.get_running_loop())
+    settings.API_AUTH_TOKEN = ensure_api_token()
+    _start_background_embedding_load()
+    yield
+
+
+app = FastAPI(title="PR-Distiller Knowledge API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -75,10 +116,10 @@ def require_api_token(request: Request) -> None:
     if not hmac.compare_digest(presented, expected):
         raise HTTPException(status_code=401, detail="Invalid bearer token")
 
-# Connect to the persistent ChromaDB cluster safely
-db = LightRAGManager()
+# db is a lazy proxy; the real LightRAGManager is loaded in the background thread.
+db = LazyDbProxy()
 conf_manager = ConfigManager()
-orchestrator = JobOrchestrator(db)
+orchestrator = JobOrchestrator(db, system_status=SYSTEM_STATUS)
 
 # ---------------------------------------------------------------------------
 # Webhook helpers
@@ -598,11 +639,9 @@ def get_webhook_stats():
 
 
 if __name__ == "__main__":
-    # Bootstrap the API auth token before uvicorn starts so the dependency
-    # has a value to compare against. Auto-generates and persists to
-    # data/.api_token (mode 0600) on first run; the web-ui reads the same file.
-    from auth import ensure_api_token
-
+    # The lifespan hook resolves the auth token when uvicorn runs the ASGI app.
+    # We still resolve it here so the print below reflects the actual token length
+    # before uvicorn's startup sequence begins.
     settings.API_AUTH_TOKEN = ensure_api_token()
     print(
         f"[*] API auth token resolved (len={len(settings.API_AUTH_TOKEN)}). "
