@@ -316,9 +316,19 @@ def check_llm_health():
 
 
 @app.get("/api/config")
-def get_config():
-    """Serves the Unified JSON configurations to the Next.js UI Settings panel."""
-    return _redact_sensitive_fields(conf_manager.load_config())
+def get_config(request: Request):
+    """Serves the Unified JSON configurations to the Next.js UI Settings panel.
+
+    Augments the redacted config with `env_overrides` and a computed
+    `webhook_url` so the Vault page can render env-disabled inputs and
+    the GitHub-webhook copy field.
+    """
+    payload = _redact_sensitive_fields(conf_manager.load_config())
+    payload["env_overrides"] = conf_manager.env_overrides()
+
+    public_base = settings.WEBHOOK_PUBLIC_URL or f"{request.url.scheme}://{request.headers.get('host', '')}"
+    payload["webhook_url"] = f"{public_base.rstrip('/')}/api/webhooks/github"
+    return payload
 
 @app.post("/api/config", dependencies=[Depends(require_api_token)])
 def update_config(payload: ConfigUpdate):

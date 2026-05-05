@@ -357,5 +357,37 @@ class TestCacheInfoEndpoint(unittest.TestCase):
         self.assertEqual(body["repo"], "acme/myrepo")
 
 
+class TestConfigEnvOverridesField(unittest.TestCase):
+    def setUp(self):
+        api.db = _make_db_mock()
+        api.conf_manager = _make_conf_mock()
+        api.orchestrator = _make_orchestrator_mock()
+        self.client = TestClient(api.app)
+
+    def test_get_config_includes_env_overrides(self):
+        api.conf_manager.env_overrides.return_value = {
+            "github_token": True,
+            "huggingface_token": False,
+        }
+        r = self.client.get("/api/config")
+        body = r.json()
+        self.assertEqual(body["env_overrides"], {
+            "github_token": True,
+            "huggingface_token": False,
+        })
+
+    def test_get_config_includes_webhook_url(self):
+        api.conf_manager.env_overrides.return_value = {}
+        with patch.object(api.settings, "WEBHOOK_PUBLIC_URL", "https://example.com"):
+            r = self.client.get("/api/config")
+        self.assertEqual(r.json()["webhook_url"], "https://example.com/api/webhooks/github")
+
+    def test_webhook_url_falls_back_to_request_origin(self):
+        api.conf_manager.env_overrides.return_value = {}
+        with patch.object(api.settings, "WEBHOOK_PUBLIC_URL", ""):
+            r = self.client.get("/api/config", headers={"host": "fallback.local:8923"})
+        self.assertIn("/api/webhooks/github", r.json()["webhook_url"])
+
+
 if __name__ == "__main__":
     unittest.main()
