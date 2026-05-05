@@ -72,7 +72,65 @@ export default function SecretsPage() {
         />
       </section>
 
-      {/* Subsequent sections appended in later tasks */}
+      <section className="mb-10 border border-white/10 rounded-2xl p-6 bg-black/40">
+        <h2 className="text-lg font-semibold mb-2">HuggingFace</h2>
+        <p className="text-xs text-neutral-500 mb-4">
+          Optional. Without a token, downloads are rate-limited and gated models
+          will fail.
+        </p>
+        <SecretInput
+          label="HuggingFace token"
+          value={isEnvOverride("huggingface_token") ? "" : config.huggingface_token}
+          onChange={(v) => updateField("huggingface_token", v)}
+          onBlur={() => save({ huggingface_token: config.huggingface_token })}
+          envOverride={isEnvOverride("huggingface_token")}
+          envVarName="HUGGINGFACE_HUB_TOKEN"
+        />
+      </section>
+
+      <section className="mb-10 border border-white/10 rounded-2xl p-6 bg-black/40">
+        <h2 className="text-lg font-semibold mb-4">LLM Providers</h2>
+        {(["openai", "anthropic", "google", "openrouter"] as const).map((p) => {
+          const envKey = `provider_api_keys.${p}`;
+          const isActive = config.llm_provider === p;
+          return (
+            <div key={p} className="mb-4">
+              <SecretInput
+                label={
+                  isActive
+                    ? `${p[0].toUpperCase() + p.slice(1)} ★ active`
+                    : p[0].toUpperCase() + p.slice(1)
+                }
+                value={
+                  isEnvOverride(envKey)
+                    ? ""
+                    : config.provider_api_keys[p] || ""
+                }
+                onChange={(v) =>
+                  setConfig({
+                    ...config,
+                    provider_api_keys: {
+                      ...config.provider_api_keys,
+                      [p]: v,
+                    },
+                  })
+                }
+                onBlur={() =>
+                  save({
+                    provider_api_keys: {
+                      [p]: config.provider_api_keys[p] || "",
+                    } as Record<string, string>,
+                  })
+                }
+                envOverride={isEnvOverride(envKey)}
+                envVarName={`${p.toUpperCase()}_API_KEY`}
+              />
+            </div>
+          );
+        })}
+      </section>
+
+      {/* Webhook section appended in P21 */}
     </div>
   );
 }
