@@ -4,6 +4,7 @@ import hmac
 import json as _json
 import logging
 import os
+import shutil
 import sys
 import time
 import uvicorn
@@ -23,6 +24,23 @@ import settings
 from system_status import SYSTEM_STATUS
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Embedding retry helpers
+# ---------------------------------------------------------------------------
+
+_HF_CACHE_DIR = os.environ.get("HF_HOME", "/cache/huggingface")
+
+
+def _wipe_hf_cache() -> None:
+    """Best-effort wipe of the HuggingFace cache directory."""
+    if os.path.isdir(_HF_CACHE_DIR):
+        shutil.rmtree(_HF_CACHE_DIR, ignore_errors=True)
+
+
+def _embedding_load_starter() -> None:
+    """Spawn the background embedding-load thread. Implemented in Task 13."""
+    raise NotImplementedError("set in startup hook")
 
 app = FastAPI(title="PR-Distiller Knowledge API")
 
@@ -249,6 +267,16 @@ async def system_events(request: Request):
             "Connection": "keep-alive",
         },
     )
+
+
+@app.post("/api/system/embedding/retry", dependencies=[Depends(require_api_token)])
+def retry_embedding(clean: bool = False):
+    """Trigger a fresh embedding download. Optionally wipes the HF cache first."""
+    if clean:
+        _wipe_hf_cache()
+    SYSTEM_STATUS.update(state="idle", error=None, bytes_downloaded=0, bytes_total=0)
+    _embedding_load_starter()
+    return {"status": "retry-started"}
 
 
 @app.get("/api/health/llm")

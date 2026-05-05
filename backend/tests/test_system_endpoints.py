@@ -150,5 +150,39 @@ class TestSystemEventsSSE(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(status._subscribers), 0)
 
 
+class TestEmbeddingRetryEndpoint(unittest.TestCase):
+    def setUp(self):
+        api.db = MagicMock()
+        api.conf_manager = MagicMock()
+        api.orchestrator = MagicMock()
+        self.client = TestClient(api.app)
+
+    def test_retry_resets_state_to_idle_and_calls_loader(self):
+        from system_status import SystemStatus
+        s = SystemStatus()
+        s.update(state="error", error="boom")
+        loader = MagicMock()
+        with patch("api.SYSTEM_STATUS", s), \
+             patch("api._embedding_load_starter", loader):
+            r = self.client.post("/api/system/embedding/retry")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(s.snapshot()["embedding"]["state"], "idle")
+        loader.assert_called_once()
+
+    def test_retry_with_clean_query_wipes_cache_dir(self):
+        from system_status import SystemStatus
+        with patch("api.SYSTEM_STATUS", SystemStatus()), \
+             patch("api._embedding_load_starter", MagicMock()), \
+             patch("api._wipe_hf_cache") as wipe:
+            r = self.client.post("/api/system/embedding/retry?clean=true")
+        self.assertEqual(r.status_code, 200)
+        wipe.assert_called_once()
+
+    def test_retry_requires_auth_when_token_set(self):
+        with patch.object(api.settings, "API_AUTH_TOKEN", "secret"):
+            r = self.client.post("/api/system/embedding/retry")
+        self.assertEqual(r.status_code, 401)
+
+
 if __name__ == "__main__":
     unittest.main()
