@@ -278,3 +278,19 @@ class ConfigManager:
             self._atomic_write_json(encrypted_wrap)
 
             return current
+
+    def env_overrides(self) -> dict[str, bool]:
+        """Return which secret fields are sourced from environment variables.
+
+        UI uses this to disable inputs that would otherwise be ineffective
+        (env wins over the encrypted-config value).
+        """
+        return {
+            "github_token": bool(settings.GITHUB_TOKEN),
+            "huggingface_token": bool(settings.HUGGINGFACE_HUB_TOKEN),
+            "github_webhook_secret": bool(settings.GITHUB_WEBHOOK_SECRET),
+            "provider_api_keys.openai": bool(settings.OPENAI_API_KEY),
+            "provider_api_keys.anthropic": bool(settings.ANTHROPIC_API_KEY),
+            "provider_api_keys.google": bool(settings.GOOGLE_API_KEY),
+            "provider_api_keys.openrouter": bool(settings.OPENROUTER_API_KEY),
+        }

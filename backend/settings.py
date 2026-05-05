@@ -22,6 +22,16 @@ CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "http://localhost:4096,http://loca
 # --- GitHub ---
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
+WEBHOOK_PUBLIC_URL = os.environ.get("WEBHOOK_PUBLIC_URL", "")
+
+# --- HuggingFace ---
+HUGGINGFACE_HUB_TOKEN = os.environ.get("HUGGINGFACE_HUB_TOKEN", "")
+
+# --- LLM Provider API Keys ---
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 # --- Security ---
 FERNET_KEY = os.environ.get("FERNET_KEY", "")
