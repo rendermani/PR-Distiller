@@ -16,6 +16,7 @@ services:
       - "${API_PORT:-8923}:8923"
     volumes:
       - backend_data:/app/data
+      - hf_cache:/cache/huggingface
     env_file:
       - path: .env
         required: false
@@ -30,6 +31,14 @@ services:
       - API_AUTH_TOKEN=${API_AUTH_TOKEN:-}
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:4096,http://localhost:3000}
       - DATA_DIR=/app/data
+      - HF_HOME=/cache/huggingface
+      - SENTENCE_TRANSFORMERS_HOME=/cache/huggingface/sentence_transformers
+      - HUGGINGFACE_HUB_TOKEN=${HUGGINGFACE_HUB_TOKEN:-}
+      - WEBHOOK_PUBLIC_URL=${WEBHOOK_PUBLIC_URL:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
     extra_hosts:
       # Makes host.docker.internal resolve on Linux (no-op on Mac/Windows).
       - "host.docker.internal:host-gateway"
@@ -82,3 +91,4 @@ services:
 
 volumes:
   backend_data:
+  hf_cache:
