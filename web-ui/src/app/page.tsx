@@ -856,6 +856,13 @@ export default function Home() {
                 )}
               </div>
 
+              <div className="text-xs text-neutral-500 text-center pt-2 border-t border-white/5">
+                Manage all credentials in the new{" "}
+                <a href="/secrets" className="text-purple-400 hover:text-purple-300 underline">
+                  🔒 Encrypted Vault
+                </a>
+              </div>
+
               <div className="flex gap-4 mt-2">
                 <button type="button" onClick={() => setShowSettings(false)} className="flex-1 bg-white/5 hover:bg-white/10 text-white py-4 rounded-lg font-semibold transition tracking-wide text-sm border border-white/5">Cancel Edit</button>
                 <button type="submit" className="flex-[2] bg-white text-black hover:bg-neutral-200 py-4 rounded-lg font-bold shadow-[0_0_20px_rgba(255,255,255,0.2)] transition tracking-wide text-sm">✓ Submit Architecture Settings</button>
