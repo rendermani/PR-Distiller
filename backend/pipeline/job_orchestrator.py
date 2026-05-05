@@ -22,17 +22,30 @@ class JobOrchestrator:
     Manages long-running pipeline distillations asynchronously preventing API thread locks.
     Maintains active volatile state strings for frontend react metric rendering.
     """
-    def __init__(self, db_instance: LightRAGManager):
+    def __init__(self, db_instance: LightRAGManager, system_status=None):
         self.db = db_instance
         self.conf = ConfigManager()
         self.active_jobs = {}
         self.cancel_flags = {}
+        self.system_status = system_status
+        if system_status is not None:
+            system_status.set_on_ready(self._drain_queue)
         
     def get_status(self, job_id: str):
         return self.active_jobs.get(job_id, {"status": "not_found"})
 
-    def request_cancel(self, job_id: str):
-        """Flips true halting the specific pipeline iteration safely"""
+    def request_cancel(self, job_id: str) -> bool:
+        """Cancel a job whether queued or already running.
+
+        For queued jobs: removes from the system queue and marks the active_jobs
+        entry so the caller can observe the cancellation.
+        For running jobs: sets the cancel flag checked by _execute_distillation.
+        """
+        if self.system_status is not None and self.system_status.dequeue_job(job_id):
+            if job_id in self.active_jobs:
+                self.active_jobs[job_id]["status"] = "Cancelled (was queued)"
+                self.active_jobs[job_id]["progress"] = -1
+            return True
         if job_id in self.active_jobs:
             self.cancel_flags[job_id] = True
             return True
@@ -201,16 +214,48 @@ class JobOrchestrator:
                 del os.environ["GITHUB_TOKEN"]
 
     def trigger_job(self, payload: dict, current_config: dict) -> str:
-        """Kicks off the asynchronous process detached from the current block."""
+        """Kick off a distillation job, or enqueue it if the embedding model is not ready.
+
+        When system_status is None or reports ready, the job starts immediately.
+        Otherwise it is added to the system queue and will be drained once the
+        embedding model finishes loading (_drain_queue is registered as the
+        on-ready callback in __init__).
+        """
         job_id = f"job-{int(time.time())}"
         trigger_source = payload.get("trigger_source", "manual")
-        self.active_jobs[job_id] = {
-            "status": "Initializing Engine...",
-            "progress": 0,
-            "trigger_source": trigger_source,
-        }
         self.cancel_flags[job_id] = False
 
-        # Fire and forget directly into the active FastAPI root thread reliably
-        asyncio.create_task(self._execute_distillation(job_id, payload, current_config))
+        if self.system_status is None or self.system_status.is_ready():
+            self.active_jobs[job_id] = {
+                "status": "Initializing Engine...",
+                "progress": 0,
+                "trigger_source": trigger_source,
+            }
+            asyncio.create_task(self._execute_distillation(job_id, payload, current_config))
+        else:
+            self.active_jobs[job_id] = {
+                "status": "Queued — waiting for embedding model",
+                "progress": 0,
+                "trigger_source": trigger_source,
+            }
+            self.system_status.enqueue_job(
+                job_id, payload, current_config,
+                reason="embedding model not ready",
+            )
+
         return job_id
+
+    def _drain_queue(self) -> None:
+        """Start all queued jobs now that the embedding model is ready.
+
+        Registered as the on-ready callback via system_status.set_on_ready().
+        Called by SystemStatus._schedule_on_ready() on the FastAPI event loop
+        via call_soon_threadsafe, so asyncio.create_task() is safe here.
+        """
+        if self.system_status is None:
+            return
+        for job_id, payload, config in self.system_status.drain_queue():
+            if job_id not in self.active_jobs:
+                continue
+            self.active_jobs[job_id]["status"] = "Starting (was queued)"
+            asyncio.create_task(self._execute_distillation(job_id, payload, config))
