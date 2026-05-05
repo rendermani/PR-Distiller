@@ -73,7 +73,7 @@ class ConfigManager:
         """Return *payload* with REDACTION_SENTINEL stripped from secret fields."""
         cleaned = dict(payload)
         sentinel = cls.REDACTION_SENTINEL
-        for field in ("github_token", "llm_api_key"):
+        for field in ("github_token", "llm_api_key", "huggingface_token", "github_webhook_secret"):
             if cleaned.get(field) == sentinel:
                 cleaned.pop(field)
         if "provider_api_keys" in cleaned and isinstance(cleaned["provider_api_keys"], dict):
@@ -173,6 +173,8 @@ class ConfigManager:
 
             return {
                 "github_token": self._decrypt(raw.get("github_token_enc", "")),
+                "huggingface_token": self._decrypt(raw.get("huggingface_token_enc", "")),
+                "github_webhook_secret": self._decrypt(raw.get("github_webhook_secret_enc", "")),
                 "llm_provider": provider,
                 "llm_api_base": raw.get("llm_api_base", settings.LLM_API_BASE),
                 "llm_model": model,
@@ -261,6 +263,8 @@ class ConfigManager:
 
             encrypted_wrap = {
                 "github_token_enc": self._encrypt(current.get("github_token", "")),
+                "huggingface_token_enc": self._encrypt(current.get("huggingface_token", "")),
+                "github_webhook_secret_enc": self._encrypt(current.get("github_webhook_secret", "")),
                 "llm_provider": active_provider,
                 "llm_api_base": current.get("llm_api_base", ""),
                 "llm_model": current.get("llm_model", ""),
