@@ -124,11 +124,18 @@ class TestOrchestratorPreProcessing(unittest.IsolatedAsyncioTestCase):
             captured_payloads.extend(payloads)
             return []
 
+        async def _ok_preflight(*a, **kw):
+            return MagicMock()
+
+        # Mock SecurityRedactor so the test doesn't try to download spacy models
+        # in environments without internet/PEP 668 access.
         with patch("pipeline.job_orchestrator.crawl_human_rejections", return_value=(crawled_tuples, {})), \
              patch("pipeline.job_orchestrator.crawl_pr_reviews", return_value=([], {})), \
              patch("pipeline.job_orchestrator.crawl_closed_issues", return_value=([], {})), \
              patch.object(orchestrator.conf, "load_config", return_value={"crawl_cursors": {}}), \
              patch.object(orchestrator.conf, "save_config"), \
+             patch("pipeline.job_orchestrator.SecurityRedactor", None), \
+             patch("pipeline.job_orchestrator.acompletion", side_effect=_ok_preflight), \
              patch("pipeline.job_orchestrator.LargeLLMExtractor") as MockExtractor:
 
             mock_extractor_instance = MagicMock()
@@ -174,12 +181,16 @@ class TestOrchestratorPreProcessing(unittest.IsolatedAsyncioTestCase):
         mock_redactor = MagicMock()
         mock_redactor.redact_text.return_value = redacted_comment
 
+        async def _ok_preflight(*a, **kw):
+            return MagicMock()
+
         with patch("pipeline.job_orchestrator.crawl_human_rejections", return_value=(crawled_tuples, {})), \
              patch("pipeline.job_orchestrator.crawl_pr_reviews", return_value=([], {})), \
              patch("pipeline.job_orchestrator.crawl_closed_issues", return_value=([], {})), \
              patch.object(orchestrator.conf, "load_config", return_value={"crawl_cursors": {}}), \
              patch.object(orchestrator.conf, "save_config"), \
              patch("pipeline.job_orchestrator.SecurityRedactor", return_value=mock_redactor), \
+             patch("pipeline.job_orchestrator.acompletion", side_effect=_ok_preflight), \
              patch("pipeline.job_orchestrator.LargeLLMExtractor") as MockExtractor:
 
             mock_extractor_instance = MagicMock()
@@ -228,12 +239,16 @@ class TestOrchestratorPreProcessing(unittest.IsolatedAsyncioTestCase):
         mock_redactor = MagicMock()
         mock_redactor.redact_text.return_value = redacted_a
 
+        async def _ok_preflight(*a, **kw):
+            return MagicMock()
+
         with patch("pipeline.job_orchestrator.crawl_human_rejections", return_value=(crawled_tuples, {})), \
              patch("pipeline.job_orchestrator.crawl_pr_reviews", return_value=([], {})), \
              patch("pipeline.job_orchestrator.crawl_closed_issues", return_value=([], {})), \
              patch.object(orchestrator.conf, "load_config", return_value={"crawl_cursors": {}}), \
              patch.object(orchestrator.conf, "save_config"), \
              patch("pipeline.job_orchestrator.SecurityRedactor", return_value=mock_redactor), \
+             patch("pipeline.job_orchestrator.acompletion", side_effect=_ok_preflight), \
              patch("pipeline.job_orchestrator.LargeLLMExtractor") as MockExtractor:
 
             mock_extractor_instance = MagicMock()

@@ -8,7 +8,7 @@ import time
 import uvicorn
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -30,6 +30,29 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def require_api_token(request: Request) -> None:
+    """Optional Bearer-token gate for mutating endpoints.
+
+    Behaviour:
+    - When `settings.API_AUTH_TOKEN` is empty, the gate is a no-op (preserves
+      the local-dev default of an open API).
+    - When set, requests must carry `Authorization: Bearer <token>` matching it
+      via constant-time comparison; otherwise the gate raises 401.
+
+    Public-by-design endpoints (health checks, webhooks, MCP query) do not
+    apply this dependency.
+    """
+    expected = settings.API_AUTH_TOKEN
+    if not expected:
+        return
+    header = request.headers.get("Authorization", "")
+    if not header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    presented = header[len("Bearer "):]
+    if not hmac.compare_digest(presented, expected):
+        raise HTTPException(status_code=401, detail="Invalid bearer token")
 
 # Connect to the persistent ChromaDB cluster safely
 db = LightRAGManager()
@@ -97,6 +120,14 @@ class WebhookRateLimiter:
 _webhook_rate_limiter = WebhookRateLimiter()
 
 
+if not settings.GITHUB_WEBHOOK_SECRET:
+    logger.warning(
+        "GITHUB_WEBHOOK_SECRET is not set. The /api/webhooks/github endpoint "
+        "will accept unsigned payloads (dev mode). Set the env var to enforce "
+        "HMAC verification before exposing this server."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
@@ -113,11 +144,33 @@ class JobRequest(BaseModel):
     threshold: float = 0.45
     use_cache: bool = False
 
+
+class ConfigUpdate(BaseModel):
+    """Typed payload for POST /api/config.
+
+    All fields optional so callers can send partial updates. Unknown top-level
+    keys are rejected to prevent arbitrary writes into the persisted config.
+    """
+    model_config = {"extra": "forbid"}
+
+    github_token: str | None = None
+    llm_provider: str | None = None
+    llm_api_base: str | None = None
+    llm_model: str | None = None
+    llm_api_key: str | None = None  # legacy; merged into provider_api_keys[active_provider]
+    provider_api_keys: dict[str, str] | None = None
+    embedding_model: str | None = None
+    repos: dict | None = None
+    provider_models: dict | None = None
+    crawl_cursors: dict | None = None
+
 def _redact_sensitive_fields(config: dict) -> dict:
     """Return a copy of config with sensitive secrets replaced by '***' or ''."""
     redacted = dict(config)
     for field in ("github_token", "llm_api_key"):
         redacted[field] = "***" if config.get(field) else ""
+    provider_keys = config.get("provider_api_keys", {})
+    redacted["provider_api_keys"] = {p: "***" if k else "" for p, k in provider_keys.items()}
     return redacted
 
 
@@ -138,6 +191,16 @@ def validate_github_token(req: TokenValidateRequest):
     if not token:
         token = conf_manager.load_config().get("github_token", "") or settings.GITHUB_TOKEN
     return GitHubClient(token=token or None).validate_token()
+
+
+@app.get("/api/health")
+def liveness_probe():
+    """Cheap, auth-free, dependency-free liveness ping.
+
+    Used by docker-compose healthcheck instead of `/api/rules`, which spins up
+    ChromaDB on first request and can race the start_period during cold-start.
+    """
+    return {"status": "ok"}
 
 
 @app.get("/api/health/llm")
@@ -181,10 +244,23 @@ def get_config():
     """Serves the Unified JSON configurations to the Next.js UI Settings panel."""
     return _redact_sensitive_fields(conf_manager.load_config())
 
-@app.post("/api/config")
-def update_config(payload: dict):
-    """Mutates global architecture settings from UI slider payloads natively."""
-    return conf_manager.save_config(payload)
+@app.post("/api/config", dependencies=[Depends(require_api_token)])
+def update_config(payload: ConfigUpdate):
+    """Mutates global architecture settings from UI slider payloads natively.
+
+    Drops the redaction sentinel '***' so the UI can round-trip GET→POST
+    without overwriting real secrets with the placeholder. ConfigManager
+    re-applies the same filter defensively.
+    """
+    data = payload.model_dump(exclude_unset=True)
+    for field in ("github_token", "llm_api_key"):
+        if data.get(field) == "***":
+            data.pop(field)
+    if "provider_api_keys" in data and isinstance(data["provider_api_keys"], dict):
+        data["provider_api_keys"] = {
+            p: k for p, k in data["provider_api_keys"].items() if k != "***"
+        }
+    return conf_manager.save_config(data)
 
 @app.get("/api/cache/{repo:path}")
 def get_cache_info(repo: str):
@@ -194,14 +270,14 @@ def get_cache_info(repo: str):
         return {"cached": False}
     return {"cached": True, **info}
 
-@app.post("/api/jobs/start")
+@app.post("/api/jobs/start", dependencies=[Depends(require_api_token)])
 async def start_pipeline(req: JobRequest):
     """Hits the explicit trigger allocating asynchronous DGX mapping routines."""
     current_config = conf_manager.load_config()
     job_id = orchestrator.trigger_job(req.model_dump(), current_config)
     return {"job_id": job_id, "status": "started"}
 
-@app.post("/api/jobs/cancel/{job_id}")
+@app.post("/api/jobs/cancel/{job_id}", dependencies=[Depends(require_api_token)])
 async def cancel_pipeline(job_id: str):
     """Hits the strict interrupt routines to break threaded background nodes safely."""
     success = orchestrator.request_cancel(job_id)
@@ -278,7 +354,7 @@ def get_rule_history(rule_id: str):
     return {"history": history}
 
 
-@app.post("/api/rules/{rule_id}/approve")
+@app.post("/api/rules/{rule_id}/approve", dependencies=[Depends(require_api_token)])
 def approve_rule(rule_id: str):
     """
     Used by the dashboard to flip an intercepted rule from needs_review -> active.
@@ -286,13 +362,13 @@ def approve_rule(rule_id: str):
     db.approve_rule(rule_id)
     return {"status": "success", "rule_id": rule_id, "state": "approved"}
 
-@app.post("/api/rules/{rule_id}/block")
+@app.post("/api/rules/{rule_id}/block", dependencies=[Depends(require_api_token)])
 def block_rule(rule_id: str):
     """Blocks a rule so it is excluded from exports and MCP queries."""
     db.block_rule(rule_id)
     return {"status": "success", "rule_id": rule_id, "state": "blocked"}
 
-@app.delete("/api/rules/{rule_id}")
+@app.delete("/api/rules/{rule_id}", dependencies=[Depends(require_api_token)])
 def reject_rule(rule_id: str):
     """Permanently wipes obsolete extractions entirely dropping them out of the Vector map."""
     db.collection.delete(ids=[rule_id])
@@ -309,7 +385,7 @@ class FeedbackRequest(BaseModel):
     action: Literal["applied", "dismissed"]
 
 
-@app.post("/api/rules/{rule_id}/feedback")
+@app.post("/api/rules/{rule_id}/feedback", dependencies=[Depends(require_api_token)])
 def record_rule_feedback(rule_id: str, req: FeedbackRequest):
     """
     Records whether a rule suggestion was applied or dismissed by the IDE.
@@ -338,13 +414,20 @@ def get_effectiveness_stats():
     return db.get_all_effectiveness_stats()
 
 
-@app.post("/api/rules")
+@app.post("/api/rules", dependencies=[Depends(require_api_token)])
 def add_rule(req: AddRuleRequest):
     """Manually adds a new rule from the dashboard."""
     rule_id = db.add_rule(req.repo, req.title, req.description, req.enforcement)
     return {"status": "created", "rule_id": rule_id}
 
-@app.post("/api/admin/reindex")
+@app.delete("/api/rules", dependencies=[Depends(require_api_token)])
+def delete_rules_for_repo(repo: str):
+    """Delete all rules for a repo. Useful for clean re-extraction runs."""
+    removed = db.delete_repo_rules(repo)
+    return {"status": "deleted", "repo": repo, "removed": removed}
+
+
+@app.post("/api/admin/reindex", dependencies=[Depends(require_api_token)])
 def reindex_embeddings():
     """Re-embed all rules using the current EMBEDDING_MODEL.
 
@@ -429,5 +512,15 @@ def get_webhook_stats():
 
 
 if __name__ == "__main__":
+    # Bootstrap the API auth token before uvicorn starts so the dependency
+    # has a value to compare against. Auto-generates and persists to
+    # data/.api_token (mode 0600) on first run; the web-ui reads the same file.
+    from auth import ensure_api_token
+
+    settings.API_AUTH_TOKEN = ensure_api_token()
+    print(
+        f"[*] API auth token resolved (len={len(settings.API_AUTH_TOKEN)}). "
+        f"Persisted at {settings.DATA_DIR}/.api_token (chmod 600)."
+    )
     print(f"[*] Starting PR-Distiller Edge API on {settings.API_HOST}:{settings.API_PORT}...")
     uvicorn.run(app, host=settings.API_HOST, port=settings.API_PORT)

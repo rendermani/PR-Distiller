@@ -41,14 +41,18 @@ export default function Home() {
 
   // Global Config
   const [config, setConfig] = useState<any>({
-    github_token: "", llm_provider: "ollama", llm_api_base: "http://localhost:11434/v1", llm_model: "ollama/qwen3:8b", llm_api_key: "", repos: {}, provider_models: {}
+    github_token: "", llm_provider: "ollama", llm_api_base: "http://localhost:11434/v1", llm_model: "ollama/qwen3:8b", llm_api_key: "", provider_api_keys: {} as Record<string, string>, repos: {}, provider_models: {}
   });
 
   // Treat "local" (old) and "ollama" as the same provider so URL-vs-API-key
   // conditional rendering works for both existing saved configs and new ones.
   const isLocalProvider = (p: string) => p === "ollama" || p === "local";
 
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8923';
+  // All backend calls go through a same-origin Next.js proxy that injects
+  // the API auth token server-side. The token never reaches the client bundle.
+  // See web-ui/src/app/api/proxy/[...path]/route.ts.
+  const apiFetch = (path: string, init: RequestInit = {}) =>
+    fetch(`/api/proxy${path.startsWith('/') ? path : `/${path}`}`, init);
 
   const [isCustomModel, setIsCustomModel] = useState(false);
   const [customModelString, setCustomModelString] = useState("");
@@ -82,7 +86,7 @@ export default function Home() {
 
   // Load Loop
   useEffect(() => {
-    fetch(`${API_URL}/api/config`).then(r => r.json()).then(data => {
+    apiFetch(`/api/config`).then(r => r.json()).then(data => {
       const hasRepos = Object.keys(data.repos || {}).length > 0;
       if (hasRepos && !selectedRepo) {
         const firstRepo = Object.keys(data.repos)[0];
@@ -105,11 +109,10 @@ export default function Home() {
   }, []);
 
   const fetchRules = () => {
-    if (!selectedRepo) {
-      setRules([]);
-      return;
-    }
-    fetch(`${API_URL}/api/rules?repo=${encodeURIComponent(selectedRepo)}`)
+    const path = selectedRepo
+      ? `/api/rules?repo=${encodeURIComponent(selectedRepo)}`
+      : `/api/rules`;
+    apiFetch(path)
       .then(r => r.json())
       .then(d => setRules(d.rules || []))
       .catch(console.error);
@@ -119,7 +122,7 @@ export default function Home() {
   useEffect(() => {
     fetchRules();
     if (selectedRepo) {
-      fetch(`${API_URL}/api/cache/${encodeURIComponent(selectedRepo)}`)
+      apiFetch(`/api/cache/${encodeURIComponent(selectedRepo)}`)
         .then(r => r.json())
         .then(d => setCacheInfo(d.cached ? d : null))
         .catch(() => setCacheInfo(null));
@@ -133,7 +136,7 @@ export default function Home() {
     let cancelled = false;
     const check = async () => {
       try {
-        const r = await fetch(`${API_URL}/api/health/llm`);
+        const r = await apiFetch(`/api/health/llm`);
         const d = await r.json();
         if (!cancelled) setLlmHealth(d);
       } catch {
@@ -152,7 +155,7 @@ export default function Home() {
     setTokenStatus({state: "checking"});
     const handle = setTimeout(async () => {
       try {
-        const r = await fetch(`${API_URL}/api/github/validate`, {
+        const r = await apiFetch(`/api/github/validate`, {
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify({token}),
@@ -175,7 +178,7 @@ export default function Home() {
     if (!jobId) return;
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`${API_URL}/api/jobs/status/${jobId}`);
+        const res = await apiFetch(`/api/jobs/status/${jobId}`);
         const data = await res.json();
 
         if (data.status === "not_found") {
@@ -205,8 +208,9 @@ export default function Home() {
   const handleSaveConfig = async (e: any) => {
     e.preventDefault();
     const activeModel = isCustomModel ? customModelString : config.llm_model;
-    const payload = { ...config, llm_model: activeModel };
-    await fetch(`${API_URL}/api/config`, {
+    const { llm_api_key: _dropped, ...rest } = config;
+    const payload = { ...rest, llm_model: activeModel };
+    await apiFetch(`/api/config`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
     });
     setConfig(payload);
@@ -234,7 +238,7 @@ export default function Home() {
       setThreshold(0.45);
       setNewRepoString("");
       setShowAddRepo(false);
-      await fetch(`${API_URL}/api/config`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updatedConfig) });
+      await apiFetch(`/api/config`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updatedConfig) });
     }
   };
 
@@ -253,7 +257,7 @@ export default function Home() {
       } else {
         setSelectedRepo("");
       }
-      await fetch(`${API_URL}/api/config`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updatedConfig) });
+      await apiFetch(`/api/config`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updatedConfig) });
     }
   };
 
@@ -264,7 +268,7 @@ export default function Home() {
       repos: { ...config.repos, [selectedRepo]: { months, threshold } }
     };
     setConfig(updatedConfig);
-    await fetch(`${API_URL}/api/config`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updatedConfig) });
+    await apiFetch(`/api/config`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updatedConfig) });
   };
 
   const handleStartJob = async (e: any) => {
@@ -276,7 +280,7 @@ export default function Home() {
       setActiveTab("telemetry");
       setJobProgress(0);
 
-      const res = await fetch(`${API_URL}/api/jobs/start`, {
+      const res = await apiFetch(`/api/jobs/start`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ repo: selectedRepo, months, threshold, use_cache: useCache })
       });
@@ -296,7 +300,7 @@ export default function Home() {
   const handleCancelJob = async () => {
     if (!jobId) return;
     try {
-      await fetch(`${API_URL}/api/jobs/cancel/${jobId}`, { method: 'POST' });
+      await apiFetch(`/api/jobs/cancel/${jobId}`, { method: 'POST' });
     } catch (err) { console.error("Failed to cancel loop:", err); }
     setJobId(null);
     setJobStatus("Idle");
@@ -306,7 +310,7 @@ export default function Home() {
   const handleExportContext = async () => {
     setIsExporting(true);
     try {
-      const res = await fetch(`${API_URL}/api/export?repo=${encodeURIComponent(selectedRepo)}&type=${exportType}&arch=${targetArch}`);
+      const res = await apiFetch(`/api/export?repo=${encodeURIComponent(selectedRepo)}&type=${exportType}&arch=${targetArch}`);
       if (!res.ok) throw new Error();
       const data = await res.json();
       setExportResult(data.content || "No rules ready to export.");
@@ -494,26 +498,26 @@ export default function Home() {
                             <div className="flex gap-2 relative">
                               <span className="text-xs text-amber-400 font-semibold px-4 py-2 border border-amber-500/20 rounded-full">Blocked</span>
                               <button onClick={async () => {
-                                await fetch(`${API_URL}/api/rules/${rule.id}/approve`, { method: 'POST' });
+                                await apiFetch(`/api/rules/${rule.id}/approve`, { method: 'POST' });
                                 fetchRules();
                               }} className="text-xs bg-white/5 text-neutral-300 border border-white/10 px-4 py-2 hover:bg-white hover:text-black flex-shrink-0 rounded-full font-semibold shadow hover:scale-105 transition">Unblock</button>
                               <button onClick={async () => {
-                                await fetch(`${API_URL}/api/rules/${rule.id}`, { method: 'DELETE' });
+                                await apiFetch(`/api/rules/${rule.id}`, { method: 'DELETE' });
                                 fetchRules();
                               }} className="text-xs bg-red-500/10 text-red-400 border border-red-500/20 px-4 py-2 hover:bg-red-500 hover:text-white flex-shrink-0 rounded-full font-semibold shadow hover:scale-105 transition">Delete</button>
                             </div>
                           ) : !isApproved ? (
                             <div className="flex gap-2 relative">
                               <button onClick={async () => {
-                                await fetch(`${API_URL}/api/rules/${rule.id}/approve`, { method: 'POST' });
+                                await apiFetch(`/api/rules/${rule.id}/approve`, { method: 'POST' });
                                 fetchRules();
                               }} className="text-xs bg-white text-black px-4 py-2 flex-shrink-0 rounded-full font-semibold shadow hover:scale-105 transition">Approve Rule</button>
                               <button onClick={async () => {
-                                await fetch(`${API_URL}/api/rules/${rule.id}/block`, { method: 'POST' });
+                                await apiFetch(`/api/rules/${rule.id}/block`, { method: 'POST' });
                                 fetchRules();
                               }} className="text-xs bg-amber-500/10 text-amber-400 border border-amber-500/20 px-4 py-2 hover:bg-amber-500 hover:text-black flex-shrink-0 rounded-full font-semibold shadow hover:scale-105 transition">Block</button>
                               <button onClick={async () => {
-                                await fetch(`${API_URL}/api/rules/${rule.id}`, { method: 'DELETE' });
+                                await apiFetch(`/api/rules/${rule.id}`, { method: 'DELETE' });
                                 fetchRules();
                               }} className="text-xs bg-red-500/10 text-red-400 border border-red-500/20 px-4 py-2 hover:bg-red-500 hover:text-white flex-shrink-0 rounded-full font-semibold shadow hover:scale-105 transition">Reject</button>
                             </div>
@@ -521,7 +525,7 @@ export default function Home() {
                             <div className="flex gap-2 relative">
                               <span className="text-xs text-green-400 font-semibold px-4 py-2 border border-green-500/20 rounded-full">Verified</span>
                               <button onClick={async () => {
-                                await fetch(`${API_URL}/api/rules/${rule.id}/block`, { method: 'POST' });
+                                await apiFetch(`/api/rules/${rule.id}/block`, { method: 'POST' });
                                 fetchRules();
                               }} className="text-xs bg-amber-500/10 text-amber-400 border border-amber-500/20 px-4 py-2 hover:bg-amber-500 hover:text-black flex-shrink-0 rounded-full font-semibold shadow hover:scale-105 transition">Block</button>
                             </div>
@@ -653,11 +657,11 @@ export default function Home() {
                     }}
                     className="w-full bg-black/50 border border-white/10 rounded-lg p-3 text-sm text-white outline-none cursor-pointer focus:border-purple-500"
                   >
-                    <option value="ollama">Local Hardware (Ollama / vLLM)</option>
-                    <option value="openai">OpenAI Architecture</option>
-                    <option value="google">Google Cloud Platform</option>
-                    <option value="anthropic">Anthropic Edge</option>
-                    <option value="openrouter">OpenRouter Marketplace</option>
+                    <option value="ollama">Self-hosted (Ollama / vLLM / any OpenAI-compatible)</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="google">Google Gemini</option>
+                    <option value="anthropic">Anthropic Claude</option>
+                    <option value="openrouter">OpenRouter</option>
                   </select>
                 </div>
 
@@ -694,7 +698,7 @@ export default function Home() {
                 {/* Conditional URL Field for Local Mode */}
                 {isLocalProvider(config.llm_provider) && (
                   <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }}>
-                    <label className="text-xs text-neutral-500 uppercase tracking-widest mb-2 block">3. Local Engine Base URL</label>
+                    <label className="text-xs text-neutral-500 uppercase tracking-widest mb-2 block">3. API Base URL (Ollama / vLLM / OpenAI-compatible)</label>
                     <input value={config.llm_api_base} onChange={e => setConfig({ ...config, llm_api_base: e.target.value })} placeholder="http://localhost:11434/v1" className="w-full bg-black/80 border border-white/10 rounded-lg p-3 text-sm font-mono text-neutral-300 outline-none focus:border-purple-500 shadow-inner" />
                   </motion.div>
                 )}
@@ -705,7 +709,16 @@ export default function Home() {
                     <label className="text-xs text-amber-500/80 uppercase tracking-widest mb-2 block flex items-center gap-2">
                       <span>🔒</span> {getApiKeyLabel()} (Symmetrically Encrypted)
                     </label>
-                    <input value={config.llm_api_key} onChange={e => setConfig({ ...config, llm_api_key: e.target.value })} type="password" placeholder={`Authorize Connection...`} className="w-full bg-black/80 border border-amber-500/40 rounded-lg p-3 text-sm font-mono text-white outline-none focus:border-amber-500 shadow-inner" />
+                    <input
+                      value={config.provider_api_keys?.[config.llm_provider] || ""}
+                      onChange={e => setConfig({
+                        ...config,
+                        provider_api_keys: { ...config.provider_api_keys, [config.llm_provider]: e.target.value }
+                      })}
+                      type="password"
+                      placeholder={`Authorize Connection...`}
+                      className="w-full bg-black/80 border border-amber-500/40 rounded-lg p-3 text-sm font-mono text-white outline-none focus:border-amber-500 shadow-inner"
+                    />
                   </motion.div>
                 )}
               </div>
@@ -793,7 +806,7 @@ export default function Home() {
               <h2 className="text-xl font-light tracking-widest uppercase mb-6">Add Rule</h2>
               <form onSubmit={async (e) => {
                 e.preventDefault();
-                await fetch(`${API_URL}/api/rules`, {
+                await apiFetch(`/api/rules`, {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({ repo: selectedRepo, title: newRuleTitle, description: newRuleDesc, enforcement: newRuleEnforce })

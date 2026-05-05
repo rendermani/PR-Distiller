@@ -136,7 +136,8 @@ All configuration is via environment variables. Copy `.env.example` to `.env` be
 | `LLM_API_KEY` | — | API key for external providers (OpenAI, Anthropic, etc.). |
 | `EMBEDDING_MODEL` | `BAAI/bge-base-en-v1.5` | Sentence-transformer model used for ChromaDB embeddings. |
 | `FERNET_KEY` | — | 32-byte base64 Fernet key for encrypting stored tokens. |
-| `API_AUTH_TOKEN` | — | Optional Bearer token to restrict API access. |
+| `API_AUTH_TOKEN` | auto | Bearer token enforced on mutating endpoints (POST/DELETE for `/api/config`, `/api/jobs/*`, `/api/rules*`, `/api/admin/*`). Auto-generated on first start and persisted to `backend/data/.api_token` (chmod 600). The web-ui mounts the same volume read-only so its server-side proxy attaches the token transparently — the token never reaches the browser. Set this env var to pin a specific value. |
+| `BACKEND_INTERNAL_URL` | `http://backend:8923` | Server-side target for the Next.js `/api/proxy/*` route handler. Override only when running the Next.js server outside Docker. |
 | `GITHUB_WEBHOOK_SECRET` | — | HMAC secret for validating GitHub webhook payloads. |
 | `DEDUP_DISTANCE_THRESHOLD` | `0.32` | Cosine distance below which two rules are considered duplicates. |
 | `AUTO_APPROVE_CONFIDENCE` | `0.80` | LLM confidence score above which rules are auto-approved. |

@@ -119,7 +119,7 @@ def crawl_human_rejections(target_repos: list, months_back: int = 2, status_call
                 if comment_id > high_water_mark:
                     high_water_mark = comment_id
 
-                user_login = c.get("user", {}).get("login", "").lower()
+                user_login = (c.get("user") or {}).get("login", "").lower()
 
                 if user_login in BOT_NAMES or "[bot]" in user_login:
                     continue
@@ -239,7 +239,7 @@ def crawl_pr_reviews(target_repos: list, months_back: int = 2, status_callback=N
 
                 for review in rev_r.json():
                     body = review.get("body", "") or ""
-                    user_login = review.get("user", {}).get("login", "").lower()
+                    user_login = (review.get("user") or {}).get("login", "").lower()
                     state = review.get("state", "")
 
                     if user_login in BOT_NAMES or "[bot]" in user_login:
@@ -286,7 +286,7 @@ ISSUE_COMMENT_MIN_LENGTH = 40
 
 def _issue_qualifies_by_label(issue: dict) -> bool:
     """True if any of the issue's labels are in QUALIFYING_ISSUE_LABELS."""
-    issue_labels = {lbl.get("name", "").lower() for lbl in issue.get("labels", [])}
+    issue_labels = {lbl.get("name", "").lower() for lbl in (issue.get("labels") or [])}
     return bool(issue_labels & QUALIFYING_ISSUE_LABELS)
 
 
@@ -297,7 +297,7 @@ def _issue_qualifies_by_keyword(issue: dict) -> bool:
 
 
 def _is_bot_comment(comment: dict) -> bool:
-    login = comment.get("user", {}).get("login", "").lower()
+    login = (comment.get("user") or {}).get("login", "").lower()
     return login in BOT_NAMES or "[bot]" in login
 
 
@@ -360,7 +360,7 @@ def _extract_lessons_from_issue(issue: dict, issue_comments: list) -> list:
             continue
 
         if _comment_contains_lesson(body):
-            user_login = comment.get("user", {}).get("login", "unknown")
+            user_login = (comment.get("user") or {}).get("login", "unknown")
             print(f"    -> Harvested Issue Lesson from {user_login} on issue #{issue.get('number')}")
             lessons.append((body, context))
 

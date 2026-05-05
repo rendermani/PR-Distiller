@@ -6,6 +6,19 @@ from db.lightrag_manager import LightRAGManager
 from pipeline.semantic_fuser import SemanticFuser
 import settings
 
+
+def _qwen_extra_body(model: str) -> dict:
+    """Return Qwen3-specific completion kwargs, or {} for other providers.
+
+    `enable_thinking=False` is recognised by Qwen3's chat template only;
+    OpenAI/Anthropic/Gemini reject unknown extra_body keys with 4xx, so the
+    flag must be gated on the model name.
+    """
+    if "qwen" in (model or "").lower():
+        return {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}}
+    return {}
+
+
 class LargeLLMExtractor:
     CLASSIFY_PROMPT = (
         "You classify PR review comments. Respond with ONLY one word:\n"
@@ -15,12 +28,27 @@ class LargeLLMExtractor:
         "Respond with exactly one word: EXTRACT or SKIP"
     )
 
-    def __init__(self, db_manager: LightRAGManager):
-        self.model = os.environ.get("EXTRACTOR_MODEL", settings.LLM_MODEL)
-        self.api_base = os.environ.get("EXTRACTOR_API_BASE", settings.LLM_API_BASE)
-        self.api_key = os.environ.get("EXTRACTOR_API_KEY", settings.LLM_API_KEY)
+    def __init__(
+        self,
+        db_manager: LightRAGManager,
+        model: str | None = None,
+        api_base: str | None = None,
+        api_key: str | None = None,
+    ):
+        # Per-instance config; env vars are only consulted when the caller
+        # passes None, preserving the orchestrator's old contract while
+        # eliminating cross-job leakage when explicit values are supplied.
+        self.model = model or os.environ.get("EXTRACTOR_MODEL", settings.LLM_MODEL)
+        self.api_base = api_base or os.environ.get("EXTRACTOR_API_BASE", settings.LLM_API_BASE)
+        self.api_key = (
+            api_key
+            or os.environ.get("EXTRACTOR_API_KEY", settings.LLM_API_KEY)
+            or "unused"
+        )
         self.db = db_manager
-        self.fuser = SemanticFuser(db_manager)
+        self.fuser = SemanticFuser(
+            db_manager, model=self.model, api_base=self.api_base, api_key=self.api_key
+        )
         
     # All valid category values for issue #7.
     VALID_CATEGORIES = frozenset({
@@ -42,7 +70,7 @@ class LargeLLMExtractor:
         "- Comments that are questions or discussions, not corrections\n\n"
         "If the review comment is NOT a generalizable coding rule, respond with exactly: {\"skip\": true}\n\n"
         "Otherwise output ONLY valid JSON:\n"
-        "{\"rule_id\": \"uuid\", "
+        "{\"rule_id\": \"descriptive-kebab-case-slug\", "
         "\"confidence\": 0.0, "
         "\"category\": \"security|performance|testing|code-style|architecture|correctness\", "
         "\"metadata\": {\"status\": \"active\"}, "
@@ -52,6 +80,7 @@ class LargeLLMExtractor:
         "\"enforcement_prompt\": \"what an AI assistant must do or avoid\", "
         "\"code_examples\": {\"bad_code\": \"...\", \"good_code\": \"...\"}}}\n\n"
         "Fields:\n"
+        "- rule_id: a unique, descriptive kebab-case slug summarizing the rule (e.g. \"use-parameterized-sql-queries\", \"avoid-mutable-default-args\"). NEVER use generic placeholders like \"uuid\" or \"unique_rule_id_1\".\n"
         "- confidence: float 0.0-1.0 — how confident you are this is a real, generalizable rule\n"
         "- category: exactly one of: security, performance, testing, code-style, architecture, correctness"
     )
@@ -115,9 +144,12 @@ class LargeLLMExtractor:
                 ],
                 api_base=self.api_base,
                 api_key=self.api_key,
-                temperature=0.1
+                temperature=0.1,
+                **_qwen_extra_body(self.model),
             )
             raw_content = response.choices[0].message.content.strip()
+            if '</think>' in raw_content:
+                raw_content = raw_content.split('</think>')[-1].strip()
             rule_dict = self._parse_llm_response(raw_content)
 
             # LLM signaled this comment isn't a useful rule
@@ -145,9 +177,12 @@ class LargeLLMExtractor:
                 ],
                 api_base=self.api_base,
                 api_key=self.api_key,
-                temperature=0.1
+                temperature=0.1,
+                **_qwen_extra_body(self.model),
             )
             raw_content = response.choices[0].message.content.strip()
+            if '</think>' in raw_content:
+                raw_content = raw_content.split('</think>')[-1].strip()
             rule_dict = self._parse_llm_response(raw_content)
 
             if rule_dict.get("skip"):
@@ -173,12 +208,14 @@ class LargeLLMExtractor:
                 api_base=self.api_base,
                 api_key=self.api_key,
                 temperature=0.0,
-                max_tokens=10
+                max_tokens=64,
+                **_qwen_extra_body(self.model),
             )
-            raw = response.choices[0].message.content.strip().upper()
+            raw = response.choices[0].message.content.strip()
+            # Strip Qwen3 reasoning if the model ignored enable_thinking=False.
             if '</think>' in raw:
                 raw = raw.split('</think>')[-1].strip()
-            return 'EXTRACT' in raw
+            return 'EXTRACT' in raw.upper()
         except Exception:
             return True  # err on side of caution
 

@@ -19,6 +19,9 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+# Ensure submodules are importable before patching.
+import pipeline.job_orchestrator  # noqa: F401
+
 # Patch construction-time singletons before the module is imported.
 with patch("db.lightrag_manager.LightRAGManager"), \
      patch("pipeline.config_manager.ConfigManager"), \
@@ -95,6 +98,36 @@ class TestConfigEndpoints(unittest.TestCase):
         self.client.post("/api/config", json={"llm_model": "updated"})
         api.conf_manager.save_config.assert_called_once_with({"llm_model": "updated"})
 
+    def test_post_config_rejects_unknown_top_level_keys(self):
+        """Unknown payload keys must produce a 422 instead of being silently persisted."""
+        response = self.client.post(
+            "/api/config", json={"llm_model": "x", "totally_made_up_field": "evil"}
+        )
+        self.assertEqual(response.status_code, 422)
+
+    def test_post_config_strips_redaction_sentinel_for_provider_api_keys(self):
+        """'***' values inside provider_api_keys must be filtered before save_config."""
+        self.client.post(
+            "/api/config",
+            json={"provider_api_keys": {"openai": "***", "anthropic": "sk-real"}},
+        )
+        saved = api.conf_manager.save_config.call_args[0][0]
+        # '***' filtered; real key preserved.
+        self.assertNotIn("openai", saved.get("provider_api_keys", {}))
+        self.assertEqual(saved["provider_api_keys"]["anthropic"], "sk-real")
+
+    def test_get_config_redacts_provider_api_keys(self):
+        api.conf_manager = _make_conf_mock(
+            config={
+                "github_token": "",
+                "llm_api_key": "",
+                "provider_api_keys": {"openai": "sk-real", "anthropic": ""},
+            }
+        )
+        body = self.client.get("/api/config").json()
+        self.assertEqual(body["provider_api_keys"]["openai"], "***")
+        self.assertEqual(body["provider_api_keys"]["anthropic"], "")
+
 
 class TestHealthEndpoints(unittest.TestCase):
     def setUp(self):
@@ -131,6 +164,15 @@ class TestHealthEndpoints(unittest.TestCase):
         body = r.json()
         self.assertFalse(body["valid"])
         self.assertIn("No token", body["error"])
+
+    def test_health_endpoint_returns_200_without_touching_db_or_auth(self):
+        """The /api/health ping must respond OK regardless of DB state and never require auth."""
+        # Make any DB access throw so we'd notice if health touched it.
+        api.db.collection.get.side_effect = RuntimeError("db should not be touched")
+        with patch.object(api.settings, "API_AUTH_TOKEN", "any-token"):
+            r = self.client.get("/api/health")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json().get("status"), "ok")
 
     @patch("api._requests" if False else "requests.get")  # patch requests.get
     def test_llm_health_reachable(self, mock_get):
@@ -211,6 +253,22 @@ class TestRulesEndpoints(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "deleted")
         api.db.collection.delete.assert_called_once_with(ids=["rule-delete-me"])
+
+    def test_delete_rules_for_repo_returns_count_and_calls_db(self):
+        api.db.delete_repo_rules.return_value = 7
+        response = self.client.delete("/api/rules?repo=acme/app")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "deleted")
+        self.assertEqual(body["repo"], "acme/app")
+        self.assertEqual(body["removed"], 7)
+        api.db.delete_repo_rules.assert_called_once_with("acme/app")
+
+    def test_delete_rules_for_repo_returns_zero_when_no_rules(self):
+        api.db.delete_repo_rules.return_value = 0
+        response = self.client.delete("/api/rules?repo=acme/empty")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["removed"], 0)
 
 
 class TestJobEndpoints(unittest.TestCase):

@@ -7,8 +7,8 @@ FROM node:22-alpine AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-ARG NEXT_PUBLIC_API_URL=http://localhost:8923
-ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+# No NEXT_PUBLIC_* build args — browser fetches go through the same-origin
+# /api/proxy/* route handler, which reads BACKEND_INTERNAL_URL at runtime.
 RUN npm run build
 
 FROM node:22-alpine

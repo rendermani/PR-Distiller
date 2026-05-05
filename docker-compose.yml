@@ -34,7 +34,7 @@ services:
       # Makes host.docker.internal resolve on Linux (no-op on Mac/Windows).
       - "host.docker.internal:host-gateway"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8923/api/rules || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:8923/api/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -47,10 +47,19 @@ services:
     build:
       context: ./web-ui
       dockerfile: Dockerfile
-      args:
-        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8923}
     ports:
       - "${WEB_PORT:-4096}:3000"
+    environment:
+      # In-network target for the same-origin /api/proxy/* route handler.
+      # The browser never sees this URL — it only hits the Next.js server.
+      - BACKEND_INTERNAL_URL=http://backend:8923
+      # Where to read the auto-generated bearer token (mounted from backend volume).
+      - API_AUTH_TOKEN_FILE=/backend-data/.api_token
+      # Operator override; takes precedence over the file.
+      - API_AUTH_TOKEN=${API_AUTH_TOKEN:-}
+    volumes:
+      # Read-only — only the backend writes the token; the proxy reads it.
+      - backend_data:/backend-data:ro
     depends_on:
       backend:
         condition: service_healthy

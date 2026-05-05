@@ -1,7 +1,12 @@
+import contextlib
+import fcntl
 import os
 import json
+import logging
 from cryptography.fernet import Fernet
 import settings
+
+logger = logging.getLogger(__name__)
 
 class ConfigManager:
     """
@@ -9,24 +14,48 @@ class ConfigManager:
     Writes persistently to `backend/data/config.json`.
     Automatically encrypts and decrypts sensitive tokens at-rest using a locally bootstrapped symmetric key.
     """
+    REDACTION_SENTINEL = "***"
+
     def __init__(self):
         self.base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.config_path = os.path.join(self.base_dir, "data", "config.json")
         self.key_path = os.path.join(self.base_dir, "data", ".secret_key")
-        self._ensure_encryption_key()
-        self.cipher = Fernet(self._load_key())
+        self.cipher = self._build_cipher(self._resolve_key())
         self._ensure_default_config()
 
-    def _ensure_encryption_key(self):
-        if not os.path.exists(self.key_path):
+    @staticmethod
+    def _build_cipher(key: bytes) -> Fernet:
+        """Construct a Fernet from *key*, re-raising init errors with the env var name."""
+        try:
+            return Fernet(key)
+        except Exception as exc:
+            raise ValueError(
+                "Failed to initialise encryption cipher. "
+                "Check the FERNET_KEY environment variable is a 32-byte url-safe "
+                f"base64-encoded value, or unset it to use the on-disk key file. "
+                f"Underlying error: {exc}"
+            ) from exc
+
+    def _resolve_key(self) -> bytes:
+        env_key = settings.FERNET_KEY
+        if env_key:
+            return env_key.encode() if isinstance(env_key, str) else env_key
+        # EAFP read: avoids a TOCTOU between exists() and open().
+        try:
+            with open(self.key_path, "rb") as key_file:
+                return key_file.read()
+        except FileNotFoundError:
             os.makedirs(os.path.dirname(self.key_path), exist_ok=True)
             key = Fernet.generate_key()
-            with open(self.key_path, "wb") as key_file:
-                key_file.write(key)
-
-    def _load_key(self):
-        with open(self.key_path, "rb") as key_file:
-            return key_file.read()
+            # O_EXCL so concurrent inits don't both clobber. Loser re-reads.
+            try:
+                fd = os.open(self.key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "wb") as key_file:
+                    key_file.write(key)
+                return key
+            except FileExistsError:
+                with open(self.key_path, "rb") as key_file:
+                    return key_file.read()
 
     def _encrypt(self, text: str) -> str:
         if not text: return ""
@@ -39,18 +68,30 @@ class ConfigManager:
         except Exception:
             return ""  # Gracefully fail if encryption key was rotated or corrupted
 
+    @classmethod
+    def _strip_redaction_sentinels(cls, payload: dict) -> dict:
+        """Return *payload* with REDACTION_SENTINEL stripped from secret fields."""
+        cleaned = dict(payload)
+        sentinel = cls.REDACTION_SENTINEL
+        for field in ("github_token", "llm_api_key"):
+            if cleaned.get(field) == sentinel:
+                cleaned.pop(field)
+        if "provider_api_keys" in cleaned and isinstance(cleaned["provider_api_keys"], dict):
+            cleaned["provider_api_keys"] = {
+                p: k for p, k in cleaned["provider_api_keys"].items() if k != sentinel
+            }
+        return cleaned
+
     def _get_default_providers(self):
         return {
             "ollama": [
-                {"id": "ollama/qwen3:8b", "label": "Qwen 3 8B (default, ~5.2GB)"},
-                {"id": "ollama/qwen3:4b", "label": "Qwen 3 4B (fastest, ~2.5GB, 256K ctx)"},
-                {"id": "ollama/qwen3:14b", "label": "Qwen 3 14B (~9.3GB)"},
-                {"id": "ollama/qwen3:30b", "label": "Qwen 3 30B (~19GB, 256K ctx)"},
-                {"id": "ollama/qwen3-coder:30b", "label": "Qwen3-Coder 30B MoE (3.3B active, 256K ctx)"},
-                {"id": "ollama/gemma4:26b", "label": "Gemma 4 26B"},
-                {"id": "ollama/gemma4:31b", "label": "Gemma 4 31B"},
-                {"id": "ollama/llama3.3:70b", "label": "Llama 3.3 70B"},
-                {"id": "ollama/llama4", "label": "Llama 4 multimodal"},
+                {"id": "openai/google/gemma-4-E4B-it", "label": "Gemma 4 E4B (recommended, ~8GB, best Pareto per benchmark)"},
+                {"id": "openai/Qwen/Qwen3-Coder-Next-FP8", "label": "Qwen3-Coder-Next FP8 (~75GB, highest quality)"},
+                {"id": "openai/Qwen/Qwen3-Coder-30B-A3B-Instruct", "label": "Qwen3-Coder 30B MoE (3B active, ~60GB)"},
+                {"id": "openai/google/gemma-4-26B-A4B-it", "label": "Gemma 4 26B-A4B MoE (4B active, ~52GB)"},
+                {"id": "openai/Qwen/Qwen3-8B", "label": "Qwen 3 8B dense (~15GB)"},
+                {"id": "ollama/qwen3:8b", "label": "Qwen 3 8B via Ollama (~5.2GB)"},
+                {"id": "ollama/qwen3:4b", "label": "Qwen 3 4B via Ollama (~2.5GB, 256K ctx)"},
             ],
             "google": [
                 {"id": "gemini/gemini-2.5-flash", "label": "Gemini 2.5 Flash"},
@@ -81,7 +122,7 @@ class ConfigManager:
                 "llm_provider": settings.LLM_PROVIDER,
                 "llm_api_base": settings.LLM_API_BASE,
                 "llm_model": settings.LLM_MODEL,
-                "llm_api_key": settings.LLM_API_KEY,
+                "provider_api_keys": {},
                 "embedding_model": "BAAI/bge-base-en-v1.5",
                 "repos": {},
                 "provider_models": self._get_default_providers()
@@ -95,9 +136,12 @@ class ConfigManager:
         intended for a vLLM endpoint. These now fail with LiteLLM asking for an
         OpenAI API key. For Ollama we need the 'ollama/...' prefix.
         """
-        if provider == "local":
+        migrated_from_local = provider == "local"
+        if migrated_from_local:
             provider = "ollama"
-        if provider == "ollama" and (model.startswith("openai/") or model.startswith("ollama/qwen2.5")):
+        if migrated_from_local and model.startswith("openai/"):
+            model = "ollama/qwen3:8b"
+        if provider == "ollama" and model.startswith("ollama/qwen2.5"):
             model = "ollama/qwen3:8b"
         # Ensure provider_models has the current canonical list for ollama.
         if "local" in pm and "ollama" not in pm:
@@ -118,38 +162,115 @@ class ConfigManager:
             model = raw.get("llm_model", "")
             provider, model, pm = self._migrate_provider(provider, model, pm)
 
+            provider_keys_enc = raw.get("provider_api_keys_enc", {})
+            provider_keys = {p: self._decrypt(v) for p, v in provider_keys_enc.items()}
+
+            legacy_key = self._decrypt(raw.get("llm_api_key_enc", ""))
+            if legacy_key and provider not in provider_keys:
+                provider_keys[provider] = legacy_key
+
+            active_key = provider_keys.get(provider, "")
+
             return {
                 "github_token": self._decrypt(raw.get("github_token_enc", "")),
                 "llm_provider": provider,
                 "llm_api_base": raw.get("llm_api_base", settings.LLM_API_BASE),
                 "llm_model": model,
-                "llm_api_key": self._decrypt(raw.get("llm_api_key_enc", "")),
+                "llm_api_key": active_key,
+                "provider_api_keys": provider_keys,
                 "embedding_model": raw.get("embedding_model", "BAAI/bge-base-en-v1.5"),
                 "repos": raw.get("repos", {}),
                 "provider_models": pm,
                 "crawl_cursors": raw.get("crawl_cursors", {})
             }
+        except FileNotFoundError:
+            return {}
         except Exception:
+            logger.exception("Failed to load config from %s", self.config_path)
             return {}
 
+    @contextlib.contextmanager
+    def _file_lock(self):
+        """Cross-process exclusive lock around the config file.
+
+        Uses an fcntl flock on a side-car .lock file so we don't fight with
+        the truncating write of the actual config. Threads in the same process
+        share an fcntl lock, so this also serialises ThreadPoolExecutor calls.
+        """
+        lock_path = self.config_path + ".lock"
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+        with open(lock_path, "w") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    def _atomic_write_json(self, payload: dict) -> None:
+        """Write *payload* to config_path via tmp + rename so a crash mid-write
+        cannot leave a half-written or empty config file."""
+        tmp_path = f"{self.config_path}.tmp.{os.getpid()}"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=4)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, self.config_path)
+
     def save_config(self, new_config: dict):
-        current = self.load_config()
-        current.update(new_config)
+        # Lock-load-mutate-write so concurrent callers don't lose updates and
+        # the on-disk JSON never contains interleaved bytes from two writers.
+        with self._file_lock():
+            current = self.load_config()
 
-        # Preserve system configs while enforcing physical encryption
-        encrypted_wrap = {
-            "github_token_enc": self._encrypt(current.get("github_token", "")),
-            "llm_provider": current.get("llm_provider", "ollama"),
-            "llm_api_base": current.get("llm_api_base", ""),
-            "llm_model": current.get("llm_model", ""),
-            "llm_api_key_enc": self._encrypt(current.get("llm_api_key", "")),
-            "embedding_model": current.get("embedding_model", "BAAI/bge-base-en-v1.5"),
-            "repos": current.get("repos", {}),
-            "provider_models": current.get("provider_models", {}),
-            "crawl_cursors": current.get("crawl_cursors", {})
-        }
+            # Defensive: strip the redaction sentinel '***' from any incoming
+            # secret field so a programmatic caller (or a UI that round-trips
+            # redacted values) cannot persist '***' as a real secret.
+            new_config = self._strip_redaction_sentinels(new_config)
 
-        with open(self.config_path, "w", encoding="utf-8") as f:
-            json.dump(encrypted_wrap, f, indent=4)
+            # Deep-merge nested dicts so a partial update for one entry doesn't
+            # wipe sibling entries written by a concurrent caller.
+            existing_keys = dict(current.get("provider_api_keys", {}))
+            existing_cursors = dict(current.get("crawl_cursors", {}))
+            existing_repos = dict(current.get("repos", {}))
+            incoming_keys = new_config.get("provider_api_keys")
+            incoming_cursors = new_config.get("crawl_cursors")
+            incoming_repos = new_config.get("repos")
 
-        return current
+            current.update(new_config)
+            if incoming_keys is not None:
+                current["provider_api_keys"] = {**existing_keys, **incoming_keys}
+            if incoming_cursors is not None:
+                current["crawl_cursors"] = {**existing_cursors, **incoming_cursors}
+            if incoming_repos is not None:
+                current["repos"] = {**existing_repos, **incoming_repos}
+
+            provider_keys = current.get("provider_api_keys", {})
+            active_provider = current.get("llm_provider", "ollama")
+
+            # Backwards-compat: scripts/clients may still POST a flat `llm_api_key`
+            # instead of the per-provider `provider_api_keys` map. Route it to the
+            # active provider. Read from new_config (not current) — current's
+            # `llm_api_key` is a derived field from the previous load_config and
+            # would be stale under a newly selected provider. The redaction
+            # sentinel was already filtered out by `_strip_redaction_sentinels`.
+            legacy_key = new_config.get("llm_api_key", "")
+            if legacy_key:
+                provider_keys[active_provider] = legacy_key
+
+            provider_keys_enc = {p: self._encrypt(k) for p, k in provider_keys.items() if k}
+
+            encrypted_wrap = {
+                "github_token_enc": self._encrypt(current.get("github_token", "")),
+                "llm_provider": active_provider,
+                "llm_api_base": current.get("llm_api_base", ""),
+                "llm_model": current.get("llm_model", ""),
+                "provider_api_keys_enc": provider_keys_enc,
+                "embedding_model": current.get("embedding_model", "BAAI/bge-base-en-v1.5"),
+                "repos": current.get("repos", {}),
+                "provider_models": current.get("provider_models", {}),
+                "crawl_cursors": current.get("crawl_cursors", {})
+            }
+
+            self._atomic_write_json(encrypted_wrap)
+
+            return current

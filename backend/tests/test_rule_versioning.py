@@ -250,6 +250,9 @@ class TestSemanticFuserMergeHistory(unittest.TestCase):
     def test_archive_rule_called_with_correct_matched_id_and_fused_id(self):
         import json
         db = self._make_mock_db(matched_id="old-xyz")
+        # store_rule returns the canonical chroma id, which is what
+        # archive_rule must reference as merged_into.
+        db.store_rule.return_value = "chroma-id-of-fused-rule"
         new_rule = self._make_new_rule()
 
         fused_json = json.dumps(self._fused_response())
@@ -262,14 +265,14 @@ class TestSemanticFuserMergeHistory(unittest.TestCase):
             mock_response.choices[0].message.content = fused_json
             mock_completion.return_value = mock_response
 
-            result = fuser.process_and_fuse(new_rule)
+            fuser.process_and_fuse(new_rule)
 
         db.archive_rule.assert_called_once()
         call_kwargs = db.archive_rule.call_args
         # First positional arg must be the old matched_id
         self.assertEqual(call_kwargs[0][0], "old-xyz")
-        # merged_into_id must equal the freshly assigned fused rule id
-        self.assertEqual(call_kwargs[1]["merged_into_id"], result["rule_id"])
+        # merged_into_id must equal the chroma id returned by store_rule.
+        self.assertEqual(call_kwargs[1]["merged_into_id"], "chroma-id-of-fused-rule")
 
     def test_fused_rule_has_merged_from_metadata(self):
         import json

@@ -1,10 +1,31 @@
 import fnmatch
+import hashlib
 import os
+import re
 from typing import Optional
 
 import chromadb
 from chromadb.config import Settings
 from chromadb.utils import embedding_functions
+
+_SLUG_CHARS = re.compile(r"[^a-z0-9_-]+")
+
+
+def _build_unique_rule_id(slug: str, repo: str, document_text: str) -> str:
+    """Construct a ChromaDB-unique id from an LLM slug, the repo, and content hash.
+
+    The LLM is now prompted to emit a kebab-case slug (e.g.
+    "use-parameterized-sql-queries"). Two reviews on the same topic legitimately
+    produce the same slug; ChromaDB ids must be unique. We namespace by repo and
+    append a content hash so:
+    - same slug + same content + same repo  -> same id (idempotent)
+    - same slug + different content         -> different id (no collision)
+    - same slug + different repo            -> different id (no cross-repo clash)
+    """
+    safe_slug = _SLUG_CHARS.sub("-", (slug or "rule").strip().lower()).strip("-") or "rule"
+    safe_repo = _SLUG_CHARS.sub("-", (repo or "global").lower()).strip("-") or "global"
+    content_hash = hashlib.sha256(document_text.encode("utf-8")).hexdigest()[:6]
+    return f"{safe_repo}__{safe_slug}__{content_hash}"
 
 def _rule_matches_file_path(path_patterns_str: str, file_path: str) -> bool:
     """Return True if file_path matches any of the comma-separated glob patterns.
@@ -100,7 +121,7 @@ class LightRAGManager:
             query_texts=[document_text],
             n_results=1,
             where={"repo": repo},
-            include=['documents', 'distances']
+            include=['documents', 'distances', 'metadatas']
         )
         
         # Guard against empty results natively 
@@ -117,11 +138,15 @@ class LightRAGManager:
             
         return None, None, None
 
-    def store_rule(self, rule_json: dict):
+    def store_rule(self, rule_json: dict) -> str:
+        """Store the rule and return the ChromaDB id used.
+
+        The returned id is the canonical reference (used by callers like
+        SemanticFuser to populate `merged_into` lineage). Does not mutate
+        `rule_json["rule_id"]` so calling this twice with the same input is
+        idempotent (same id both times).
         """
-        Stores the high-quality rule extracted by the 70B Teacher / Gemini 3.1 Pro.
-        """
-        rule_id = rule_json.get("rule_id", os.urandom(8).hex())
+        slug = rule_json.get("rule_id") or os.urandom(8).hex()
         content = rule_json.get("content", {})
         description = content.get("description", "")
         enforcement = content.get("enforcement_prompt", "")
@@ -134,6 +159,11 @@ class LightRAGManager:
         # The searchable vector string combines condition and what was rejected
         document_text = f"Rule: {content.get('title')} - Context: {description}. Enforce: {enforcement}"
 
+        # Build a ChromaDB-unique id; same slug across rules legitimately
+        # produces the same kebab-case label, so we namespace by repo and
+        # append a content hash to disambiguate.
+        rule_id = _build_unique_rule_id(slug, repo, document_text)
+
         # Flatten path_patterns list to a comma-separated string.
         # ChromaDB metadata values must be str/int/float/bool — not lists.
         raw_patterns: list = rule_json.get("scoping", {}).get("path_patterns", [])
@@ -141,6 +171,7 @@ class LightRAGManager:
 
         chroma_metadata = {
             "rule_id": rule_id,
+            "title_slug": slug,
             "repo": repo,
             "status": metadata.get("status", "active"),
             "occurrence_count": occurrences,
@@ -159,6 +190,7 @@ class LightRAGManager:
             ids=[rule_id]
         )
         print(f"[*] Stored Rule Vector [{rule_id}] into CodeRAG Receiver.")
+        return rule_id
 
     def delete_rule(self, rule_id: str):
         """Removes an obsolete rule aggressively after Semantic LLM fusing merges it safely."""
@@ -287,6 +319,21 @@ class LightRAGManager:
             ids=[rule_id],
             metadatas=[metadatas]
         )
+
+    def delete_repo_rules(self, repo: str) -> int:
+        """Delete every rule for *repo*. Returns the number of rules removed.
+
+        Used by dev-mode replay: when re-extracting from the crawl cache with
+        a new model or prompt, the repo's existing rules must be cleared so
+        fresh extractions stand on their own instead of being deduplicated
+        into stale rules via semantic fusion.
+        """
+        existing = self.collection.get(where={"repo": repo})
+        ids = existing.get("ids") or []
+        if not ids:
+            return 0
+        self.collection.delete(ids=ids)
+        return len(ids)
 
     def is_blocked(self, document_text: str, repo: str, distance_threshold: float = 0.20) -> bool:
         """Checks if a new extraction is semantically similar to any blocked rule."""

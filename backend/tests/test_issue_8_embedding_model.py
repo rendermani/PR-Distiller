@@ -203,9 +203,8 @@ class TestConfigManagerEmbeddingModel(unittest.TestCase):
         manager.base_dir = tmp_dir
         manager.config_path = os.path.join(tmp_dir, "config.json")
         manager.key_path = os.path.join(tmp_dir, ".secret_key")
-        manager._ensure_encryption_key()
         from cryptography.fernet import Fernet
-        manager.cipher = Fernet(manager._load_key())
+        manager.cipher = Fernet(manager._resolve_key())
         manager._ensure_default_config()
         return manager
 

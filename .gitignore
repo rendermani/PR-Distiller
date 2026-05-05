@@ -45,4 +45,9 @@ htmlcov/
 coverage.xml
 
 # Docker
+docker-compose.override.yml
 *.log
+
+# Local-only data we never want to commit
+backups/
+benchmarks/

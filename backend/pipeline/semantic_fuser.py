@@ -5,18 +5,51 @@ from litellm import completion
 from db.lightrag_manager import LightRAGManager
 import settings
 
+
+def _qwen_extra_body(model: str) -> dict:
+    """See llm.extractor._qwen_extra_body — duplicated to avoid circular import."""
+    if "qwen" in (model or "").lower():
+        return {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}}
+    return {}
+
+
+def _first_meaningful(*values):
+    """Return the first value that is not None and not an empty string.
+
+    Plain `a or b or c` would skip legitimate falsy values (0, 0.0, False).
+    For category/confidence we want only None and "" to be considered missing.
+    """
+    for v in values:
+        if v is None:
+            continue
+        if isinstance(v, str) and v == "":
+            continue
+        return v
+    return None
+
+
 class SemanticFuser:
     """
     Phase 2 Big Data Deduplicator.
     Handles mathematical collisions in ChromaDB by feeding both conflicting vectors
     back into the local Small LLM for an intelligent merge.
     """
-    def __init__(self, db_manager: LightRAGManager):
+    def __init__(
+        self,
+        db_manager: LightRAGManager,
+        model: str | None = None,
+        api_base: str | None = None,
+        api_key: str | None = None,
+    ):
         self.db = db_manager
-        # We actively target the 7B node for fast text-merging tasks
-        self.model = os.environ.get("EXTRACTOR_MODEL", settings.LLM_MODEL)
-        self.api_base = os.environ.get("EXTRACTOR_API_BASE", settings.LLM_API_BASE)
-        self.api_key = os.environ.get("EXTRACTOR_API_KEY", settings.LLM_API_KEY)
+        # Per-instance config; env vars are only consulted when None is passed.
+        self.model = model or os.environ.get("EXTRACTOR_MODEL", settings.LLM_MODEL)
+        self.api_base = api_base or os.environ.get("EXTRACTOR_API_BASE", settings.LLM_API_BASE)
+        self.api_key = (
+            api_key
+            or os.environ.get("EXTRACTOR_API_KEY", settings.LLM_API_KEY)
+            or "unused"
+        )
 
     def process_and_fuse(self, new_rule_json: dict):
         """
@@ -45,11 +78,12 @@ class SemanticFuser:
 
         # 2. Instruct the DGX Server to combine the two semantic strings intelligently
         system_prompt = (
-            "You are a Senior AI Architect managing a technical knowledge base. "
-            "You will be given two highly overlapping developer constraints. "
-            "Merge them into a single, unified constraint without losing any unique technical nuances from either. "
-            "Output ONLY valid JSON following this schema: "
-            "{\"rule_id\": \"uuid\", \"metadata\": {\"status\": \"active\"}, \"content\": {\"title\": \"...\", \"description\": \"...\", \"enforcement_prompt\": \"...\"}}"
+            "You merge two overlapping developer rules into one unified rule. "
+            "Preserve all unique technical nuances from both. "
+            "Output ONLY valid JSON:\n"
+            "{\"rule_id\": \"descriptive-kebab-case-slug\", \"category\": \"security|performance|testing|code-style|architecture|correctness\", "
+            "\"confidence\": 0.0, \"content\": {\"title\": \"...\", \"description\": \"...\", \"enforcement_prompt\": \"...\"}}\n"
+            "rule_id must be a descriptive kebab-case slug (e.g. \"use-parameterized-sql-queries\"). NEVER use placeholders like \"uuid\"."
         )
 
         user_prompt = f'''
@@ -71,18 +105,25 @@ class SemanticFuser:
                 ],
                 api_base=self.api_base,
                 api_key=self.api_key,
-                temperature=0.1
+                temperature=0.1,
+                **_qwen_extra_body(self.model),
             )
             raw_content = response.choices[0].message.content.strip()
-            
+            if '</think>' in raw_content:
+                raw_content = raw_content.split('</think>')[-1].strip()
+
             if raw_content.startswith("```json"):
                 raw_content = raw_content.replace("```json", "").replace("```", "").strip()
                 
             fused_rule = json.loads(raw_content)
-            
-            # Auto-assign a freshly merged unique ID
-            fused_rule["rule_id"] = str(uuid.uuid4())[:8]
-            
+
+            # Keep the LLM's slug; store_rule namespaces it to a unique chroma
+            # id (`<repo>__<slug>__<content-hash>`) and returns the canonical
+            # id we use for the merged_into lineage reference. Falling back to
+            # a random hex slug is fine — store_rule still namespaces it.
+            if not fused_rule.get("rule_id"):
+                fused_rule["rule_id"] = uuid.uuid4().hex[:8]
+
             # Mathematical Fusing: Combine total volumes observed of this architectural failure
             base_occurrences = matched_metadatas.get("occurrence_count", 1) if matched_metadatas else 1
             new_occurrences = new_rule_json.get("metadata", {}).get("occurrence_count", 1)
@@ -94,17 +135,41 @@ class SemanticFuser:
             fused_rule["metadata"]["repo"] = repo
             fused_rule["metadata"]["status"] = "needs_review"
 
+            # `a or b or c` would skip legitimate falsy values like
+            # confidence=0.0 or category="" — use explicit None checks.
+            base_category = matched_metadatas.get("category") if matched_metadatas else None
+            new_meta = new_rule_json.get("metadata", {})
+            new_category = (
+                new_meta.get("category")
+                if new_meta.get("category") is not None
+                else new_rule_json.get("category")
+            )
+            fused_rule["metadata"]["category"] = _first_meaningful(
+                fused_rule.get("category"), new_category, base_category
+            )
+            base_conf = matched_metadatas.get("confidence") if matched_metadatas else None
+            new_conf = (
+                new_meta.get("confidence")
+                if new_meta.get("confidence") is not None
+                else new_rule_json.get("confidence")
+            )
+            fused_rule["metadata"]["confidence"] = _first_meaningful(
+                fused_rule.get("confidence"), new_conf, base_conf
+            )
+
             # Versioning: record which rules were merged to produce this one
             old_merge_count = matched_metadatas.get("merge_count", 0) if matched_metadatas else 0
             fused_rule["metadata"]["merge_count"] = old_merge_count + 1
             new_rule_id = new_rule_json.get("rule_id", "")
             fused_rule["metadata"]["merged_from"] = f"{matched_id},{new_rule_id}"
 
-            # 3. Archive old rule for rollback lineage, then purge and store the synthesised truth
-            self.db.archive_rule(matched_id, merged_into_id=fused_rule["rule_id"])
+            # 3. Store first so we have the canonical chroma id, then archive
+            # the old rule pointing at it, then delete the old rule. archive
+            # MUST run before delete so lineage isn't lost mid-operation.
+            fused_chroma_id = self.db.store_rule(fused_rule)
+            self.db.archive_rule(matched_id, merged_into_id=fused_chroma_id)
             self.db.delete_rule(matched_id)
-            self.db.store_rule(fused_rule)
-            
+
             print(f"✅ Semantic Merge Complete! Replaced two messy concepts into single unified rule: {fused_rule['content']['title']}")
             return fused_rule
             

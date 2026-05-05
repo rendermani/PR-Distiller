@@ -1,10 +1,15 @@
 import asyncio
+import logging
 import time
 import os
 import sys
 
+from litellm import acompletion
+
 sys.path.append(os.path.abspath(os.path.dirname(os.path.dirname(__file__))))
 import settings
+
+logger = logging.getLogger(__name__)
 from scripts.deep_crawler import crawl_human_rejections, crawl_pr_reviews, crawl_closed_issues
 from llm.extractor import LargeLLMExtractor
 from db.lightrag_manager import LightRAGManager
@@ -127,21 +132,65 @@ class JobOrchestrator:
                 safe_body = redactor.redact_text(comment_body) if redactor is not None else comment_body
                 cleaned_payloads.append((safe_body, diff_hunk))
 
-            self.active_jobs[job_id]["status"] = f"Batch Processing {len(cleaned_payloads)} rule payloads with {config.get('llm_model')}"
+            # 3. Extract — pass per-job LLM config via constructor args so
+            # concurrent jobs cannot leak credentials through the process env.
+            llm_api_base = config.get("llm_api_base", "") or settings.LLM_API_BASE
+            # Local/vLLM servers don't require auth but LiteLLM+OpenAI-compat
+            # still demand a non-empty key; the extractor applies the same
+            # fallback in its own code path.
+            llm_api_key = (
+                config.get("llm_api_key", "") or settings.LLM_API_KEY or "unused"
+            )
+            llm_model = config.get("llm_model", "") or settings.LLM_MODEL
+            extractor = LargeLLMExtractor(
+                self.db, model=llm_model, api_base=llm_api_base, api_key=llm_api_key
+            )
+
+            # Preflight: fail loudly BEFORE wiping anything if the LLM is
+            # unreachable or the configured model is wrong. Previously a
+            # misconfigured run would 404 every extraction, silently wipe the
+            # repo's rules in dev-mode, and still report "Completed".
+            self.active_jobs[job_id]["status"] = f"Preflighting LLM ({llm_model})..."
+            try:
+                await acompletion(
+                    model=llm_model,
+                    messages=[{"role": "user", "content": "ping"}],
+                    api_base=llm_api_base,
+                    api_key=llm_api_key,
+                    max_tokens=1, temperature=0,
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"LLM preflight failed for model={llm_model} "
+                    f"base={llm_api_base}: {exc}"
+                ) from exc
+
+            # Dev-mode replay: wipe existing rules now that we know the LLM
+            # works, so re-extraction starts from a clean slate instead of
+            # being dedup-merged into stale vectors from a prior run.
+            if use_cache and dev_cache.has_cache(repo):
+                removed = await asyncio.to_thread(self.db.delete_repo_rules, repo)
+                print(f"[Dev Mode] Cleared {removed} prior rules for {repo}")
+
+            self.active_jobs[job_id]["status"] = f"Batch Processing {len(cleaned_payloads)} rule payloads with {llm_model}"
             self.active_jobs[job_id]["progress"] = 35
 
-            # 3. Extract — configure the extractor via environment for this job.
-            os.environ["EXTRACTOR_API_BASE"] = config.get("llm_api_base", "") or settings.LLM_API_BASE
-            os.environ["EXTRACTOR_API_KEY"] = config.get("llm_api_key", "") or settings.LLM_API_KEY
-            os.environ["EXTRACTOR_MODEL"] = config.get("llm_model", "") or settings.LLM_MODEL
-            extractor = LargeLLMExtractor(self.db)
+            extracted = await extractor.batch_extract(cleaned_payloads, repo=repo)
+            extracted_count = len(extracted) if extracted else 0
+            attempted = len(cleaned_payloads)
+            if attempted > 0 and extracted_count == 0:
+                raise RuntimeError(
+                    f"All {attempted} extraction calls failed — check LLM logs. "
+                    f"No rules were stored."
+                )
 
-            await extractor.batch_extract(cleaned_payloads, repo=repo)
-
-            self.active_jobs[job_id]["status"] = "Completed Pipeline Run successfully!"
+            self.active_jobs[job_id]["status"] = (
+                f"Completed: {extracted_count}/{attempted} rules extracted"
+            )
             self.active_jobs[job_id]["progress"] = 100
 
         except Exception as e:
+            logger.exception("Pipeline job %s failed", job_id)
             self.active_jobs[job_id]["status"] = f"FAILED: {str(e)}"
             self.active_jobs[job_id]["progress"] = -1
         finally:
