@@ -88,6 +88,7 @@ export default function Home() {
   const [tokenStatus, setTokenStatus] = useState<{state: "idle" | "checking" | "valid" | "invalid"; message?: string; login?: string; scopes?: string[]}>({state: "idle"});
   const [llmHealth, setLlmHealth] = useState<{reachable: boolean; api_base?: string; error?: string} | null>(null);
   const [bannerDismissed, setBannerDismissed] = useState(false);
+  const [hfTokenSet, setHfTokenSet] = useState(false);
   const [systemStatus, setSystemStatus] = useState<SystemStatusPayload>({
     embedding: { state: "idle", model_name: "", bytes_downloaded: 0, bytes_total: 0 },
     queued_jobs: [],
@@ -136,6 +137,10 @@ export default function Home() {
       if (!isStandard) setCustomModelString(data.llm_model || "");
 
       setConfig({ ...data, repos: data.repos || {}, llm_provider: providerStr, provider_models: data.provider_models || {} });
+      setHfTokenSet(
+        Boolean(data.huggingface_token && data.huggingface_token !== "***") ||
+        Boolean(data.env_overrides?.huggingface_token)
+      );
     }).catch(console.error);
   }, []);
 
@@ -440,6 +445,14 @@ export default function Home() {
                   style={{ width: `${systemStatus.embedding.bytes_total > 0 ? Math.max(2, 100 * systemStatus.embedding.bytes_downloaded / systemStatus.embedding.bytes_total) : 2}%` }}
                 />
               </div>
+              {!hfTokenSet && (
+                <p className="text-xs text-neutral-400 mt-2">
+                  Tip: downloads are throttled without a HuggingFace token.{" "}
+                  <a href="/secrets" className="text-purple-400 hover:text-purple-300 underline">
+                    → Set one in the Vault
+                  </a>
+                </p>
+              )}
             </>
           )}
           {systemStatus.embedding.state === "loading" && (
