@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import hmac
 import json as _json
@@ -10,6 +11,7 @@ from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
@@ -213,6 +215,40 @@ def get_system_status():
     applied per-route in this app; omitting the dependency here is sufficient.
     """
     return SYSTEM_STATUS.snapshot()
+
+
+@app.get("/api/system/events")
+async def system_events(request: Request):
+    """SSE stream of SystemStatus mutations.
+
+    Sends the current snapshot immediately on subscribe, then one event per
+    mutation.  A keepalive comment every 15 s prevents proxy idle-timeouts.
+    Auth-free, mirrors /api/system/status.
+    """
+    async def event_stream():
+        q = SYSTEM_STATUS.subscribe()
+        try:
+            yield f"data: {_json.dumps(SYSTEM_STATUS.snapshot())}\n\n"
+            while True:
+                if await request.is_disconnected():
+                    return
+                try:
+                    update = await asyncio.wait_for(q.get(), timeout=15.0)
+                    yield f"data: {_json.dumps(update)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        finally:
+            SYSTEM_STATUS.unsubscribe(q)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @app.get("/api/health/llm")
