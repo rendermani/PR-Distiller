@@ -2,6 +2,26 @@
 import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 
+type EmbeddingStatus = {
+  state: "idle" | "downloading" | "loading" | "ready" | "error";
+  model_name: string;
+  bytes_downloaded: number;
+  bytes_total: number;
+  error?: string | null;
+};
+
+type QueuedJob = {
+  job_id: string;
+  repo: string;
+  queued_at: number;
+  reason: string;
+};
+
+type SystemStatusPayload = {
+  embedding: EmbeddingStatus;
+  queued_jobs: QueuedJob[];
+};
+
 export default function Home() {
   // Pipeline Rules State
   const [rules, setRules] = useState<any[]>([]);
@@ -61,6 +81,10 @@ export default function Home() {
   const [tokenStatus, setTokenStatus] = useState<{state: "idle" | "checking" | "valid" | "invalid"; message?: string; login?: string; scopes?: string[]}>({state: "idle"});
   const [llmHealth, setLlmHealth] = useState<{reachable: boolean; api_base?: string; error?: string} | null>(null);
   const [bannerDismissed, setBannerDismissed] = useState(false);
+  const [systemStatus, setSystemStatus] = useState<SystemStatusPayload>({
+    embedding: { state: "idle", model_name: "", bytes_downloaded: 0, bytes_total: 0 },
+    queued_jobs: [],
+  });
 
   const detectOS = (): "mac" | "windows" | "linux" | "other" => {
     if (typeof navigator === "undefined") return "other";
@@ -146,6 +170,56 @@ export default function Home() {
     check();
     const t = setInterval(check, 20000);
     return () => { cancelled = true; clearInterval(t); };
+  }, []);
+
+  // SystemStatus: SSE primary, 10 s poll backup, fetch on mount.
+  useEffect(() => {
+    let cancelled = false;
+    let es: EventSource | null = null;
+    let backoff = 1000;
+    let reconnectTimer: number | null = null;
+    let pollTimer: number | null = null;
+
+    const refresh = async () => {
+      try {
+        const r = await apiFetch("/api/system/status");
+        const d = await r.json();
+        if (!cancelled) setSystemStatus(d as SystemStatusPayload);
+      } catch {
+        /* network blip — backup poll will retry */
+      }
+    };
+
+    const connect = () => {
+      if (cancelled) return;
+      es = new EventSource("/api/proxy/api/system/events");
+      es.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          if (!cancelled) setSystemStatus(data as SystemStatusPayload);
+          backoff = 1000;
+        } catch {
+          /* ignore malformed frame */
+        }
+      };
+      es.onerror = () => {
+        es?.close();
+        if (cancelled) return;
+        refresh();
+        reconnectTimer = window.setTimeout(connect, Math.min((backoff *= 2), 30000));
+      };
+    };
+
+    refresh();
+    connect();
+    pollTimer = window.setInterval(refresh, 10_000);
+
+    return () => {
+      cancelled = true;
+      es?.close();
+      if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+      if (pollTimer !== null) clearInterval(pollTimer);
+    };
   }, []);
 
   // GitHub token validator — debounced on value change.
