@@ -18,6 +18,7 @@ from pipeline.config_manager import ConfigManager
 from pipeline.job_orchestrator import JobOrchestrator
 from pipeline import dev_cache
 import settings
+from system_status import SYSTEM_STATUS
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +202,17 @@ def liveness_probe():
     ChromaDB on first request and can race the start_period during cold-start.
     """
     return {"status": "ok"}
+
+
+@app.get("/api/system/status")
+def get_system_status():
+    """Auth-free snapshot of embedding state, download progress, and queued jobs.
+
+    Intentionally has no ``Depends(require_api_token)`` — the frontend uses this
+    for initial load and as a SSE fallback before a token is available.  Auth is
+    applied per-route in this app; omitting the dependency here is sufficient.
+    """
+    return SYSTEM_STATUS.snapshot()
 
 
 @app.get("/api/health/llm")
