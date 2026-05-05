@@ -1,6 +1,8 @@
 import asyncio
 import os
 import sys
+import threading
+import time
 import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -32,7 +34,7 @@ class TestSystemStatusSnapshot(unittest.TestCase):
 
 
 class TestSystemStatusSubscribers(unittest.IsolatedAsyncioTestCase):
-    async def test_subscribers_receive_initial_snapshot_on_subscribe(self):
+    async def test_subscribe_returns_queue_without_initial_push(self):
         from system_status import SystemStatus
         status = SystemStatus()
         q = status.subscribe()
@@ -64,6 +66,70 @@ class TestSystemStatusSubscribers(unittest.IsolatedAsyncioTestCase):
         # No update should arrive on q.
         with self.assertRaises(asyncio.TimeoutError):
             await asyncio.wait_for(q.get(), timeout=0.2)
+
+    async def test_safe_put_cross_thread_uses_call_soon_threadsafe(self):
+        """update() called from a background thread fans out via call_soon_threadsafe."""
+        from system_status import SystemStatus
+        status = SystemStatus()
+        loop = asyncio.get_running_loop()
+        status.attach_loop(loop)
+        q = status.subscribe()
+
+        def _worker():
+            status.update(state="downloading")
+
+        t = threading.Thread(target=_worker)
+        t.start()
+        t.join()
+
+        snap = await asyncio.wait_for(q.get(), timeout=1.0)
+        self.assertEqual(snap["embedding"]["state"], "downloading")
+        status.unsubscribe(q)
+
+    async def test_queuefull_drops_silently(self):
+        """Overflow beyond maxsize=64 is dropped without raising an exception."""
+        from system_status import SystemStatus
+        status = SystemStatus()
+        q = status.subscribe()
+        # Fire 70 updates without consuming; 6 should be silently dropped.
+        for i in range(70):
+            status.update(state="downloading", model_name=f"model-{i}")
+        self.assertEqual(q.qsize(), 64)
+        status.unsubscribe(q)
+
+    async def test_update_download_progress_throttles_rapid_calls(self):
+        """Rapid progress updates well under 1% and within 250 ms are throttled."""
+        from system_status import SystemStatus
+        status = SystemStatus()
+        q = status.subscribe()
+        # bytes 0..9 out of 1000: each step is 0.1%, well under the 1% threshold.
+        # All 10 calls happen within milliseconds (inside 250 ms window).
+        # The first call always passes (sentinel _last_progress_pct == -1.0).
+        for i in range(10):
+            status.update_download_progress(i, 1000)
+        self.assertLess(q.qsize(), 10)
+        status.unsubscribe(q)
+
+    async def test_on_ready_fires_only_on_idle_to_ready_transition(self):
+        """on_ready callback fires exactly once on the idle→ready transition."""
+        from system_status import SystemStatus
+        status = SystemStatus()
+        calls: list[str] = []
+
+        def _on_ready() -> None:
+            calls.append("fired")
+
+        # No loop attached — uses synchronous fallback path.
+        status.set_on_ready(_on_ready)
+
+        status.update(state="downloading")
+        self.assertEqual(calls, [], "callback must not fire on non-ready transition")
+
+        status.update(state="ready")
+        self.assertEqual(calls, ["fired"], "callback must fire exactly once on idle→ready")
+
+        status.update(state="ready")
+        self.assertEqual(calls, ["fired"], "callback must not fire again on ready→ready")
 
 
 if __name__ == "__main__":

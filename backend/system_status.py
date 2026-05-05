@@ -3,6 +3,14 @@
 Mutating methods take a threading lock because the embedding loader runs in a
 background thread; subscribers are asyncio.Queue instances belonging to SSE
 handlers on the FastAPI event loop.
+
+Thread-safety contract for setup fields
+----------------------------------------
+``attach_loop`` and ``set_on_ready`` MUST be called during FastAPI startup,
+before any background work (e.g. the embedding loader thread) begins.
+
+``_loop`` and ``_on_ready`` are therefore written exactly once from the startup
+thread and are only read thereafter — they are intentionally not lock-guarded.
 """
 import asyncio
 import copy
@@ -24,11 +32,14 @@ class SystemStatus:
             },
             "queued_jobs": [],
         }
+        # SSE handlers must call unsubscribe() in their finally block; otherwise queues leak.
         self._subscribers: list[asyncio.Queue] = []
+        # set once at startup; readers don't lock (see module docstring).
         self._loop: asyncio.AbstractEventLoop | None = None
+        # set once at startup; readers don't lock (see module docstring).
         self._on_ready: Callable[[], None] | None = None
         self._last_progress_push = 0.0
-        self._last_progress_pct = -1.0
+        self._last_progress_pct = -1.0  # sentinel: ensures first call always passes the >=1% threshold
 
     # --- snapshot / update ---
 
@@ -83,8 +94,8 @@ class SystemStatus:
                 pass
 
     def _fanout(self) -> None:
-        snapshot = self.snapshot()
         with self._lock:
+            snapshot = copy.deepcopy(self._state)
             subs = list(self._subscribers)
         for q in subs:
             self._safe_put(q, snapshot)
