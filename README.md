@@ -139,12 +139,30 @@ All configuration is via environment variables. Copy `.env.example` to `.env` be
 | `API_AUTH_TOKEN` | auto | Bearer token enforced on mutating endpoints (POST/DELETE for `/api/config`, `/api/jobs/*`, `/api/rules*`, `/api/admin/*`). Auto-generated on first start and persisted to `backend/data/.api_token` (chmod 600). The web-ui mounts the same volume read-only so its server-side proxy attaches the token transparently — the token never reaches the browser. Set this env var to pin a specific value. |
 | `BACKEND_INTERNAL_URL` | `http://backend:8923` | Server-side target for the Next.js `/api/proxy/*` route handler. Override only when running the Next.js server outside Docker. |
 | `GITHUB_WEBHOOK_SECRET` | — | HMAC secret for validating GitHub webhook payloads. |
+| `HUGGINGFACE_HUB_TOKEN` | — | Optional. Required for gated models; recommended to avoid rate limits. Mirrored on the Vault page. |
+| `WEBHOOK_PUBLIC_URL` | — | The publicly reachable URL of your backend. Used by the Vault page to render the GitHub webhook URL. |
+| `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY` | — | Optional env override for provider keys; the Vault page is the alternative. |
 | `DEDUP_DISTANCE_THRESHOLD` | `0.32` | Cosine distance below which two rules are considered duplicates. |
 | `AUTO_APPROVE_CONFIDENCE` | `0.80` | LLM confidence score above which rules are auto-approved. |
 | `WEBHOOK_MIN_INTERVAL` | `60` | Minimum seconds between webhook-triggered jobs per repository. |
 | `API_PORT` | `8923` | Host port for the FastAPI backend. |
 | `WEB_PORT` | `4096` | Host port for the Next.js dashboard. |
 | `OLLAMA_PORT` | `11434` | Host port for the Ollama service. |
+
+### Encrypted Vault
+
+User-supplied credentials live on the **Encrypted Vault** page at
+[http://localhost:4096/secrets](http://localhost:4096/secrets):
+
+- GitHub personal access token
+- HuggingFace token (optional)
+- LLM provider API keys (OpenAI, Anthropic, Google, OpenRouter)
+- GitHub webhook URL + secret (with reveal-and-copy)
+
+Values are Fernet-encrypted at rest in `backend/data/config.json`. Setting any
+of the listed env vars makes the corresponding input read-only and badges it
+with `from environment` — the env value wins. This lets you integrate with
+HashiCorp Vault, AWS Secrets Manager, or any other secret-injection setup.
 
 ## MCP Server Integration
 
