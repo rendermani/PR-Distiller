@@ -40,6 +40,8 @@ class SystemStatus:
         self._on_ready: Callable[[], None] | None = None
         self._last_progress_push = 0.0
         self._last_progress_pct = -1.0  # sentinel: ensures first call always passes the >=1% threshold
+        # Full payload+config for pending jobs, kept off the snapshot (may contain secrets).
+        self._pending: dict[str, tuple[dict, dict]] = {}
 
     # --- snapshot / update ---
 
@@ -133,6 +135,56 @@ class SystemStatus:
             self._loop.call_soon_threadsafe(cb)
         else:
             cb()
+
+    # --- job queueing ---
+
+    def is_ready(self) -> bool:
+        with self._lock:
+            return self._state["embedding"]["state"] == "ready"
+
+    def enqueue_job(self, job_id: str, payload: dict, config: dict, *, reason: str) -> None:
+        """Append a pending job to the queue.
+
+        The snapshot entry contains only non-secret fields (job_id, repo,
+        queued_at, reason).  Full payload and config — which may carry tokens —
+        are stored in ``_pending`` and excluded from every snapshot.
+        """
+        entry = {
+            "job_id": job_id,
+            "repo": payload.get("repo", ""),
+            "queued_at": time.time(),
+            "reason": reason,
+        }
+        with self._lock:
+            self._state["queued_jobs"].append(entry)
+            self._pending[job_id] = (payload, config)
+        self._fanout()
+
+    def drain_queue(self) -> list[tuple[str, dict, dict]]:
+        """Remove and return all pending jobs as (job_id, payload, config) triples."""
+        with self._lock:
+            entries = self._state["queued_jobs"]
+            self._state["queued_jobs"] = []
+            drained = [
+                (entry["job_id"], *self._pending.pop(entry["job_id"], ({}, {})))
+                for entry in entries
+            ]
+        self._fanout()
+        return drained
+
+    def dequeue_job(self, job_id: str) -> bool:
+        """Remove a single job by id.  Returns True if found and removed."""
+        with self._lock:
+            before = len(self._state["queued_jobs"])
+            self._state["queued_jobs"] = [
+                j for j in self._state["queued_jobs"] if j["job_id"] != job_id
+            ]
+            removed = before != len(self._state["queued_jobs"])
+            if removed:
+                self._pending.pop(job_id, None)
+        if removed:
+            self._fanout()
+        return removed
 
 
 # Module-level singleton used by api.py and tests.

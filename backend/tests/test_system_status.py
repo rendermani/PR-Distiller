@@ -132,5 +132,47 @@ class TestSystemStatusSubscribers(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, ["fired"], "callback must not fire again on ready→ready")
 
 
+class TestSystemStatusQueue(unittest.TestCase):
+    def setUp(self):
+        from system_status import SystemStatus
+        self.status = SystemStatus()
+
+    def test_enqueue_appends_to_queued_jobs_in_snapshot(self):
+        self.status.enqueue_job("job-1", {"repo": "acme/app"}, {}, reason="not ready")
+        snap = self.status.snapshot()
+        self.assertEqual(len(snap["queued_jobs"]), 1)
+        self.assertEqual(snap["queued_jobs"][0]["job_id"], "job-1")
+        self.assertEqual(snap["queued_jobs"][0]["repo"], "acme/app")
+        self.assertEqual(snap["queued_jobs"][0]["reason"], "not ready")
+        self.assertIn("queued_at", snap["queued_jobs"][0])
+
+    def test_drain_queue_returns_and_clears_all_jobs(self):
+        self.status.enqueue_job("job-1", {"repo": "a"}, {"k": "v1"}, reason="r")
+        self.status.enqueue_job("job-2", {"repo": "b"}, {"k": "v2"}, reason="r")
+        drained = self.status.drain_queue()
+        self.assertEqual(len(drained), 2)
+        self.assertEqual([d[0] for d in drained], ["job-1", "job-2"])
+        self.assertEqual(drained[0][1], {"repo": "a"})
+        self.assertEqual(drained[0][2], {"k": "v1"})
+        self.assertEqual(self.status.snapshot()["queued_jobs"], [])
+
+    def test_dequeue_job_removes_specific_job_and_returns_true(self):
+        self.status.enqueue_job("job-1", {"repo": "a"}, {}, reason="r")
+        self.status.enqueue_job("job-2", {"repo": "b"}, {}, reason="r")
+        self.assertTrue(self.status.dequeue_job("job-1"))
+        snap = self.status.snapshot()
+        self.assertEqual([j["job_id"] for j in snap["queued_jobs"]], ["job-2"])
+
+    def test_dequeue_returns_false_when_job_missing(self):
+        self.assertFalse(self.status.dequeue_job("nope"))
+
+    def test_is_ready_only_when_state_is_ready(self):
+        self.assertFalse(self.status.is_ready())
+        self.status.update(state="downloading")
+        self.assertFalse(self.status.is_ready())
+        self.status.update(state="ready")
+        self.assertTrue(self.status.is_ready())
+
+
 if __name__ == "__main__":
     unittest.main()
