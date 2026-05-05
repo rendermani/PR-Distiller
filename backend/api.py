@@ -244,6 +244,8 @@ class ConfigUpdate(BaseModel):
     model_config = {"extra": "forbid"}
 
     github_token: str | None = None
+    huggingface_token: str | None = None
+    github_webhook_secret: str | None = None
     llm_provider: str | None = None
     llm_api_base: str | None = None
     llm_model: str | None = None

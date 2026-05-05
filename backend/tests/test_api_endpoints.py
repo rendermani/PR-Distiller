@@ -147,6 +147,16 @@ class TestConfigEndpoints(unittest.TestCase):
             r = self.client.get("/api/config")
         self.assertEqual(r.status_code, 401)
 
+    def test_post_config_accepts_huggingface_token(self):
+        r = self.client.post("/api/config", json={"huggingface_token": "hf_xx"})
+        self.assertEqual(r.status_code, 200)
+        api.conf_manager.save_config.assert_called_with({"huggingface_token": "hf_xx"})
+
+    def test_post_config_accepts_github_webhook_secret(self):
+        r = self.client.post("/api/config", json={"github_webhook_secret": "wh"})
+        self.assertEqual(r.status_code, 200)
+        api.conf_manager.save_config.assert_called_with({"github_webhook_secret": "wh"})
+
 
 class TestHealthEndpoints(unittest.TestCase):
     def setUp(self):
