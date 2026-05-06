@@ -54,26 +54,37 @@ class TestProgressCapturingTqdm(unittest.TestCase):
 
 
 class TestCaptureHfProgress(unittest.TestCase):
+    # Use sys.modules to reach the actual tqdm submodule. We deliberately don't
+    # use `import huggingface_hub.utils.tqdm as alias` because huggingface_hub's
+    # __init__ re-exports the class as the package attribute, so that import
+    # form binds to the *class*, not the module — and we need to assert against
+    # the module attribute the loader patches.
+    def _hf_tqdm_module(self):
+        import sys
+        import importlib
+        importlib.import_module("huggingface_hub.utils.tqdm")
+        return sys.modules["huggingface_hub.utils.tqdm"]
+
     def test_context_manager_restores_originals_on_exit(self):
-        import huggingface_hub.utils.tqdm as hf_tqdm_mod
         from embedding_loader import capture_hf_progress
 
-        original = hf_tqdm_mod.tqdm
+        m = self._hf_tqdm_module()
+        original = m.tqdm
         with capture_hf_progress():
-            self.assertIsNot(hf_tqdm_mod.tqdm, original)
-        self.assertIs(hf_tqdm_mod.tqdm, original)
+            self.assertIsNot(m.tqdm, original)
+        self.assertIs(m.tqdm, original)
 
     def test_context_manager_restores_originals_on_exception(self):
-        import huggingface_hub.utils.tqdm as hf_tqdm_mod
         from embedding_loader import capture_hf_progress
 
-        original = hf_tqdm_mod.tqdm
+        m = self._hf_tqdm_module()
+        original = m.tqdm
         try:
             with capture_hf_progress():
                 raise RuntimeError("boom")
         except RuntimeError:
             pass
-        self.assertIs(hf_tqdm_mod.tqdm, original)
+        self.assertIs(m.tqdm, original)
 
 
 if __name__ == "__main__":

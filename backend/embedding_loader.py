@@ -7,29 +7,27 @@ module; the original is restored on exit (success or exception).
 
 Implementation note — huggingface_hub import resolution
 --------------------------------------------------------
-``huggingface_hub/utils/__init__.py`` re-exports the ``tqdm`` class directly as
-a package-level attribute, so ``import huggingface_hub.utils.tqdm as x`` binds
-``x`` to the *class*, not the module file.  We replace that package attribute
-with the actual module object at import time so that:
-
-  1. Callers (and tests) that do ``import huggingface_hub.utils.tqdm as m``
-     receive the module, making ``m.tqdm`` addressable.
-  2. ``capture_hf_progress()`` can patch ``m.tqdm`` at the module level, which
-     is the attribute the library's internal download code reads.
+``huggingface_hub/utils/__init__.py`` re-exports the ``tqdm`` class as a
+package-level attribute, so ``import huggingface_hub.utils.tqdm as x`` binds
+``x`` to the *class*. We deliberately do NOT overwrite that package attribute:
+``huggingface_hub.file_download`` does ``from .utils import tqdm`` and uses the
+result in a ``tqdm | None`` type annotation that blows up if ``tqdm`` is a
+module. We grab the actual submodule via ``sys.modules`` and patch
+``module.tqdm`` directly — that's the attribute hf's download code reads.
 """
 import contextlib
 import importlib
+import sys
 from typing import ClassVar
 
-import huggingface_hub.utils as _hf_utils
 import tqdm.auto
 from system_status import SYSTEM_STATUS
 
-# Load the actual tqdm *module* (huggingface_hub/utils/tqdm.py) and expose it
-# as the package attribute so that ``import huggingface_hub.utils.tqdm as m``
-# resolves to the module rather than the re-exported class.
-_hf_tqdm_module = importlib.import_module("huggingface_hub.utils.tqdm")
-_hf_utils.tqdm = _hf_tqdm_module
+# Force-import the submodule so it's resolvable by sys.modules below.  We can't
+# `import huggingface_hub.utils.tqdm` as a regular import, because the parent
+# package's __init__ shadows the submodule attribute with a re-exported class.
+importlib.import_module("huggingface_hub.utils.tqdm")
+_hf_tqdm_module = sys.modules["huggingface_hub.utils.tqdm"]
 
 
 class _ProgressCapturingTqdm(tqdm.auto.tqdm):
