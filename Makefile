@@ -183,6 +183,28 @@ preflight: ## Verify all requirements before first run
 
 ## —— Cleanup ——————————————————————————————————————————————
 
-clean: ## Remove all containers, volumes, and build cache
+clean: ## Remove all containers, volumes, and build cache (DESTROYS rules + config)
 	docker compose $(COMPOSE_OLLAMA) down -v --remove-orphans
 	docker system prune -f
+
+reclaim: ## Free Docker disk space without losing data (build cache only)
+	@printf "$(CYAN)Before:$(RESET)\n"
+	@docker system df
+	@printf "\n$(CYAN)Pruning build cache (costs rebuild time, no data)...$(RESET)\n"
+	@docker builder prune -af
+	@printf "\n$(CYAN)After:$(RESET)\n"
+	@docker system df
+	@printf "\n$(CYAN)Host disk:$(RESET)\n"
+	@df -h /System/Volumes/Data 2>/dev/null | tail -1 || df -h / | tail -1
+	@printf "\nImages are left alone. To review unused ones: $(CYAN)docker images$(RESET)\n"
+
+disk-check: ## Warn if free space is too low to rebuild the backend image safely
+	@free_gb=$$(df -g /System/Volumes/Data 2>/dev/null | tail -1 | awk '{print $$4}' || df -g / | tail -1 | awk '{print $$4}'); \
+	printf "Free: $${free_gb}GB\n"; \
+	if [ "$${free_gb}" -lt 25 ]; then \
+		printf "$(RED)Low disk.$(RESET) The backend image is ~13GB and a build writes a similar amount of cache.\n"; \
+		printf "Docker's VM disk is sparse, so it keeps writing until the *host* fills and then reports\n"; \
+		printf "an opaque I/O error. Run $(CYAN)make reclaim$(RESET) before building.\n"; \
+		exit 1; \
+	fi; \
+	printf "$(GREEN)Enough headroom to build.$(RESET)\n"
