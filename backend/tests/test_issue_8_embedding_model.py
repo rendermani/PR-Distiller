@@ -263,10 +263,15 @@ class TestReindexEndpoint(unittest.TestCase):
             import api as api_module
             reload(api_module)
 
+        # Bind the mock onto the proxy rather than patching api_module.db: the
+        # patch context exited before the returned client was ever used, so the
+        # endpoint saw the real unbound LazyDbProxy and waited on its readiness
+        # event. Binding persists for the lifetime of this reloaded module.
+        api_module.db.bind(mock_db)
+
         from fastapi.testclient import TestClient
-        with patch.object(api_module, "db", mock_db):
-            client = TestClient(api_module.app)
-            return client, mock_db, api_module
+        client = TestClient(api_module.app)
+        return client, mock_db, api_module
 
     def test_reindex_endpoint_returns_200(self):
         """POST /api/admin/reindex must return HTTP 200."""

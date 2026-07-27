@@ -430,7 +430,14 @@ class TestGetAllEffectivenessStats(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 def _make_api_module():
-    """Import api module with all heavy deps mocked out."""
+    """Import api module with all heavy deps mocked out.
+
+    Reloading api creates a fresh unbound LazyDbProxy as `api.db`. Patching
+    LightRAGManager is not enough: nothing calls db.bind() outside the
+    background embedding loader, so every endpoint touching `db` would wait on
+    the proxy's readiness event until it timed out. Bind the mock explicitly so
+    requests resolve against it immediately.
+    """
     mock_db = MagicMock()
     mock_conf = MagicMock()
     mock_orch = MagicMock()
@@ -440,6 +447,8 @@ def _make_api_module():
          patch("pipeline.job_orchestrator.JobOrchestrator", return_value=mock_orch):
         import api as api_module
         importlib.reload(api_module)
+
+    api_module.db.bind(mock_db)
 
     return api_module, mock_db
 
