@@ -440,7 +440,7 @@ def update_config(payload: ConfigUpdate):
     Each incoming llm_models entry is validated via the model_registry
     validator; malformed entries return HTTP 400 with the validator's error.
     """
-    from pipeline.model_registry import validate_entry, ModelRegistryError
+    from pipeline.model_registry import validate_registry, ModelRegistryError
 
     data = payload.model_dump(exclude_unset=True)
 
@@ -458,8 +458,10 @@ def update_config(payload: ConfigUpdate):
 
     if "llm_models" in data:
         try:
-            for entry in data["llm_models"]:
-                validate_entry(entry)
+            # validate_registry also rejects duplicate ids, which previously
+            # produced dead config: resolve_model takes the first match, so the
+            # shadowed entry was unreachable while the UI still displayed it.
+            validate_registry(data["llm_models"])
         except ModelRegistryError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -471,10 +473,37 @@ def update_config(payload: ConfigUpdate):
         # this read is outside it. A merge-on-write helper inside
         # ConfigManager is the correct long-term fix.
         current = conf_manager.load_config()
-        current_by_id = {e["id"]: e for e in current.get("llm_models", [])}
+        # .get("id") because a stored entry may predate validation (hand-edited
+        # config.json); indexing with e["id"] made one such entry raise KeyError
+        # and turn any masked-secret POST into a 500.
+        current_by_id = {
+            e["id"]: e
+            for e in current.get("llm_models", [])
+            if isinstance(e, dict) and e.get("id")
+        }
         for entry in data["llm_models"]:
             if entry.get("api_key_override") == "***":
                 entry["api_key_override"] = current_by_id.get(entry["id"], {}).get("api_key_override", "")
+
+    # Every active id must name a registry entry. Without this the request
+    # succeeded and the failure resurfaced at job runtime as a per-model
+    # preflight error, far from the change that caused it. Validate against the
+    # incoming registry when one is supplied, else the stored one.
+    if "llm_models_active" in data:
+        if "llm_models" in data:
+            known_ids = {e["id"] for e in data["llm_models"]}
+        else:
+            stored = conf_manager.load_config().get("llm_models", [])
+            known_ids = {e["id"] for e in stored if isinstance(e, dict) and e.get("id")}
+        unknown = [mid for mid in data["llm_models_active"] if mid not in known_ids]
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"llm_models_active names unknown model id(s): {', '.join(unknown)}. "
+                    f"Known ids: {', '.join(sorted(known_ids)) or '(none)'}"
+                ),
+            )
 
     return conf_manager.save_config(data)
 

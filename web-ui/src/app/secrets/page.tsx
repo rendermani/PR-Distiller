@@ -8,24 +8,38 @@ type Config = {
   github_token: string;
   huggingface_token: string;
   github_webhook_secret: string;
-  llm_provider: string;
+  llm_models: LlmModel[];
+  llm_models_active: string[];
   provider_api_keys: Record<string, string>;
   env_overrides: Record<string, boolean>;
   webhook_url: string;
+};
+
+type LlmModel = {
+  id: string;
+  model: string;
 };
 
 const EMPTY_CONFIG: Config = {
   github_token: "",
   huggingface_token: "",
   github_webhook_secret: "",
-  llm_provider: "",
+  llm_models: [],
+  llm_models_active: [],
   provider_api_keys: {},
   env_overrides: {},
   webhook_url: "",
 };
 
+/** LiteLLM provider prefix of a model string: "openai/gpt-4o" -> "openai".
+ *  An unprefixed model means OpenAI, matching _provider_from_model() in
+ *  backend/pipeline/model_registry.py. */
+const providerOf = (model: string): string =>
+  model.includes("/") ? model.split("/", 1)[0] : "openai";
+
 export default function SecretsPage() {
   const [config, setConfig] = useState<Config>(EMPTY_CONFIG);
+  const [saveError, setSaveError] = useState("");
 
   useEffect(() => {
     apiFetch("/api/config")
@@ -38,27 +52,56 @@ export default function SecretsPage() {
   };
 
   const save = async (payload: Partial<Config>) => {
-    await apiFetch("/api/config", {
+    // Report a rejected save. Discarding the response meant a 4xx looked
+    // identical to success: the field kept the typed value on screen while
+    // nothing was persisted.
+    const res = await apiFetch("/api/config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      setSaveError(`Save failed (HTTP ${res.status}). ${detail.slice(0, 300)}`);
+      return;
+    }
+    setSaveError("");
   };
 
   const isEnvOverride = (key: string) => Boolean(config.env_overrides[key]);
+
+  // Which providers the next job will actually reach, derived from the active
+  // models' LiteLLM prefixes. Replaces a single llm_provider field that the
+  // multi-model refactor removed, leaving the marker permanently unlit.
+  const activeProviders = new Set(
+    config.llm_models
+      .filter((m) => config.llm_models_active.includes(m.id))
+      .map((m) => providerOf(m.model)),
+  );
 
   return (
     <div className="min-h-screen bg-black text-white p-12 max-w-3xl mx-auto">
       <header className="mb-10">
         <h1 className="text-3xl font-light flex items-center gap-3">
           <span>🔒</span>
-          <span>Encrypted Vault — AES-256</span>
+          {/* Fernet is AES-128-CBC; the old "AES-256" heading contradicted the
+              accurate description directly below it. */}
+          <span>Encrypted Vault — AES-128</span>
         </h1>
         <p className="text-sm text-neutral-400 mt-2">
           Stored encrypted at rest with Fernet (AES-128 CBC + HMAC-SHA256). Keys
           set via environment variables are read-only here.
         </p>
       </header>
+
+      {saveError && (
+        <div
+          className="mb-6 text-xs text-red-400 border border-red-500/40 rounded-lg p-3 bg-red-500/5"
+          role="alert"
+        >
+          {saveError}
+        </div>
+      )}
 
       <section className="mb-10 border border-white/10 rounded-2xl p-6 bg-black/40">
         <h2 className="text-lg font-semibold mb-4">GitHub</h2>
@@ -92,7 +135,7 @@ export default function SecretsPage() {
         <h2 className="text-lg font-semibold mb-4">LLM Providers</h2>
         {(["openai", "anthropic", "google", "openrouter"] as const).map((p) => {
           const envKey = `provider_api_keys.${p}`;
-          const isActive = config.llm_provider === p;
+          const isActive = activeProviders.has(p);
           return (
             <div key={p} className="mb-4">
               <SecretInput
