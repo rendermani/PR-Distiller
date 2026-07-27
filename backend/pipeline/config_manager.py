@@ -17,9 +17,11 @@ class ConfigManager:
     REDACTION_SENTINEL = "***"
 
     def __init__(self):
-        self.base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        self.config_path = os.path.join(self.base_dir, "data", "config.json")
-        self.key_path = os.path.join(self.base_dir, "data", ".secret_key")
+        # Paths come from settings.DATA_DIR so that containerized and native
+        # runs share one store. Deriving them from __file__ made the location
+        # depend on where the code sits, silently splitting the two modes.
+        self.config_path = os.path.join(settings.DATA_DIR, "config.json")
+        self.key_path = os.path.join(settings.DATA_DIR, ".secret_key")
         self.cipher = self._build_cipher(self._resolve_key())
         self._ensure_default_config()
 
@@ -73,13 +75,25 @@ class ConfigManager:
         """Return *payload* with REDACTION_SENTINEL stripped from secret fields."""
         cleaned = dict(payload)
         sentinel = cls.REDACTION_SENTINEL
-        for field in ("github_token", "llm_api_key", "huggingface_token", "github_webhook_secret"):
+        for field in ("github_token", "huggingface_token", "github_webhook_secret"):
             if cleaned.get(field) == sentinel:
                 cleaned.pop(field)
         if "provider_api_keys" in cleaned and isinstance(cleaned["provider_api_keys"], dict):
             cleaned["provider_api_keys"] = {
                 p: k for p, k in cleaned["provider_api_keys"].items() if k != sentinel
             }
+        if "llm_models" in cleaned and isinstance(cleaned["llm_models"], list):
+            # Strip the sentinel from each entry's api_key_override so a UI that
+            # round-trips a masked value doesn't overwrite the stored plaintext.
+            # We replace with empty string; the API layer (Task 3) restores from
+            # storage. At the config_manager level, empty means "no override".
+            sanitized = []
+            for entry in cleaned["llm_models"]:
+                new_entry = dict(entry)
+                if new_entry.get("api_key_override") == sentinel:
+                    new_entry["api_key_override"] = ""
+                sanitized.append(new_entry)
+            cleaned["llm_models"] = sanitized
         return cleaned
 
     def _get_default_providers(self):
@@ -114,40 +128,45 @@ class ConfigManager:
             ]
         }
 
+    @staticmethod
+    def _seed_models_from_env() -> list:
+        """Build the initial llm_models registry from the LLM_* env vars.
+
+        The multi-model refactor made `llm_models` the source of truth without a
+        backfill path, leaving fresh and pre-refactor installs with an empty
+        registry and no way to run a job. Seeding from the documented env vars
+        reproduces the single-model behaviour operators configured via .env.
+
+        Returns an empty list when LLM_MODEL is unset — there is nothing to
+        seed, and inventing an endpoint would hide the misconfiguration.
+        """
+        if not settings.LLM_MODEL:
+            return []
+        return [{
+            "id": "default",
+            "label": settings.LLM_MODEL,
+            "model": settings.LLM_MODEL,
+            "api_base": settings.LLM_API_BASE,
+            "api_key_override": settings.LLM_API_KEY,
+            "enabled": True,
+        }]
+
     def _ensure_default_config(self):
         if not os.path.exists(self.config_path):
             os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
+            seeded_models = self._seed_models_from_env()
             default_config = {
                 "github_token": "",
-                "llm_provider": settings.LLM_PROVIDER,
-                "llm_api_base": settings.LLM_API_BASE,
-                "llm_model": settings.LLM_MODEL,
+                "github_webhook_secret": "",
+                "huggingface_token": "",
+                "llm_models": seeded_models,
+                "llm_models_active": [e["id"] for e in seeded_models],
                 "provider_api_keys": {},
                 "embedding_model": "BAAI/bge-base-en-v1.5",
                 "repos": {},
-                "provider_models": self._get_default_providers()
+                "provider_models": self._get_default_providers(),
             }
             self.save_config(default_config)
-
-    def _migrate_provider(self, provider: str, model: str, pm: dict) -> tuple[str, str, dict]:
-        """Upgrade legacy 'local' provider and openai/ model prefixes to ollama.
-
-        Old configs stored provider='local' with models like 'openai/Qwen/...'
-        intended for a vLLM endpoint. These now fail with LiteLLM asking for an
-        OpenAI API key. For Ollama we need the 'ollama/...' prefix.
-        """
-        migrated_from_local = provider == "local"
-        if migrated_from_local:
-            provider = "ollama"
-        if migrated_from_local and model.startswith("openai/"):
-            model = "ollama/qwen3:8b"
-        if provider == "ollama" and model.startswith("ollama/qwen2.5"):
-            model = "ollama/qwen3:8b"
-        # Ensure provider_models has the current canonical list for ollama.
-        if "local" in pm and "ollama" not in pm:
-            pm = {**pm, "ollama": self._get_default_providers()["ollama"]}
-            pm.pop("local", None)
-        return provider, model, pm
 
     def load_config(self) -> dict:
         try:
@@ -158,32 +177,30 @@ class ConfigManager:
             if not pm:
                 pm = self._get_default_providers()
 
-            provider = raw.get("llm_provider", "ollama")
-            model = raw.get("llm_model", "")
-            provider, model, pm = self._migrate_provider(provider, model, pm)
-
             provider_keys_enc = raw.get("provider_api_keys_enc", {})
             provider_keys = {p: self._decrypt(v) for p, v in provider_keys_enc.items()}
 
-            legacy_key = self._decrypt(raw.get("llm_api_key_enc", ""))
-            if legacy_key and provider not in provider_keys:
-                provider_keys[provider] = legacy_key
-
-            active_key = provider_keys.get(provider, "")
+            # Decrypt per-entry api_key_override fields.
+            llm_models_raw = raw.get("llm_models", [])
+            llm_models = []
+            for entry in llm_models_raw:
+                decrypted_entry = dict(entry)
+                enc_key = entry.get("api_key_override_enc", "")
+                decrypted_entry["api_key_override"] = self._decrypt(enc_key) if enc_key else ""
+                decrypted_entry.pop("api_key_override_enc", None)
+                llm_models.append(decrypted_entry)
 
             return {
                 "github_token": self._decrypt(raw.get("github_token_enc", "")),
                 "huggingface_token": self._decrypt(raw.get("huggingface_token_enc", "")),
                 "github_webhook_secret": self._decrypt(raw.get("github_webhook_secret_enc", "")),
-                "llm_provider": provider,
-                "llm_api_base": raw.get("llm_api_base", settings.LLM_API_BASE),
-                "llm_model": model,
-                "llm_api_key": active_key,
+                "llm_models": llm_models,
+                "llm_models_active": raw.get("llm_models_active", []),
                 "provider_api_keys": provider_keys,
                 "embedding_model": raw.get("embedding_model", "BAAI/bge-base-en-v1.5"),
                 "repos": raw.get("repos", {}),
                 "provider_models": pm,
-                "crawl_cursors": raw.get("crawl_cursors", {})
+                "crawl_cursors": raw.get("crawl_cursors", {}),
             }
         except FileNotFoundError:
             return {}
@@ -224,7 +241,7 @@ class ConfigManager:
         with self._file_lock():
             current = self.load_config()
 
-            # Defensive: strip the redaction sentinel '***' from any incoming
+            # Contract: strip the redaction sentinel '***' from any incoming
             # secret field so a programmatic caller (or a UI that round-trips
             # redacted values) cannot persist '***' as a real secret.
             new_config = self._strip_redaction_sentinels(new_config)
@@ -247,32 +264,30 @@ class ConfigManager:
                 current["repos"] = {**existing_repos, **incoming_repos}
 
             provider_keys = current.get("provider_api_keys", {})
-            active_provider = current.get("llm_provider", "ollama")
-
-            # Backwards-compat: scripts/clients may still POST a flat `llm_api_key`
-            # instead of the per-provider `provider_api_keys` map. Route it to the
-            # active provider. Read from new_config (not current) — current's
-            # `llm_api_key` is a derived field from the previous load_config and
-            # would be stale under a newly selected provider. The redaction
-            # sentinel was already filtered out by `_strip_redaction_sentinels`.
-            legacy_key = new_config.get("llm_api_key", "")
-            if legacy_key:
-                provider_keys[active_provider] = legacy_key
-
             provider_keys_enc = {p: self._encrypt(k) for p, k in provider_keys.items() if k}
+
+            # Encrypt per-entry api_key_override values.
+            llm_models_in = current.get("llm_models", [])
+            llm_models_enc = []
+            for entry in llm_models_in:
+                enc_entry = dict(entry)
+                plaintext_key = enc_entry.pop("api_key_override", "")
+                enc_entry["api_key_override_enc"] = (
+                    self._encrypt(plaintext_key) if plaintext_key else ""
+                )
+                llm_models_enc.append(enc_entry)
 
             encrypted_wrap = {
                 "github_token_enc": self._encrypt(current.get("github_token", "")),
                 "huggingface_token_enc": self._encrypt(current.get("huggingface_token", "")),
                 "github_webhook_secret_enc": self._encrypt(current.get("github_webhook_secret", "")),
-                "llm_provider": active_provider,
-                "llm_api_base": current.get("llm_api_base", ""),
-                "llm_model": current.get("llm_model", ""),
+                "llm_models": llm_models_enc,
+                "llm_models_active": current.get("llm_models_active", []),
                 "provider_api_keys_enc": provider_keys_enc,
                 "embedding_model": current.get("embedding_model", "BAAI/bge-base-en-v1.5"),
                 "repos": current.get("repos", {}),
                 "provider_models": current.get("provider_models", {}),
-                "crawl_cursors": current.get("crawl_cursors", {})
+                "crawl_cursors": current.get("crawl_cursors", {}),
             }
 
             self._atomic_write_json(encrypted_wrap)

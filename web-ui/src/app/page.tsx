@@ -60,8 +60,11 @@ export default function Home() {
   const [cacheInfo, setCacheInfo] = useState<any>(null);
 
   // Global Config
+  // Placeholder shown before /api/config resolves. api_base defaults to
+  // host.docker.internal because the backend runs in a container, where
+  // localhost is the container's own loopback rather than the host's Ollama.
   const [config, setConfig] = useState<any>({
-    github_token: "", llm_provider: "ollama", llm_api_base: "http://localhost:11434/v1", llm_model: "ollama/qwen3:8b", llm_api_key: "", provider_api_keys: {} as Record<string, string>, repos: {}, provider_models: {}
+    github_token: "", llm_provider: "ollama", llm_api_base: "http://host.docker.internal:11434/v1", llm_model: "ollama/qwen3:8b", llm_api_key: "", provider_api_keys: {} as Record<string, string>, repos: {}, provider_models: {}
   });
 
   // Treat "local" (old) and "ollama" as the same provider so URL-vs-API-key
@@ -419,6 +422,12 @@ export default function Home() {
   const os = detectOS();
   const instructions = ollamaInstructions(os);
 
+  // "No models configured" and "server down" are different failures with
+  // different fixes; the banner previously reported both as "unreachable",
+  // which sent debugging toward the network instead of Settings.
+  // api_base is empty exactly when the backend never got as far as probing.
+  const llmNeedsConfig = Boolean(llmHealth && !llmHealth.reachable && !llmHealth.api_base);
+
   return (
     <main className="min-h-screen bg-[#0A0A0A] text-white p-8 selection:bg-purple-500/30 font-sans flex flex-col md:flex-row gap-8 relative overflow-hidden">
 
@@ -480,14 +489,33 @@ export default function Home() {
       {llmBannerVisible && (
         <div className="fixed top-0 left-0 right-0 z-40 bg-amber-500/10 border-b border-amber-500/30 backdrop-blur-md px-6 py-3 flex items-start gap-4">
           <div className="flex-1">
-            <div className="text-sm font-semibold text-amber-300 mb-1">
-              LLM server unreachable at {llmHealth!.api_base || "configured endpoint"}
-            </div>
-            <div className="text-xs text-amber-200/80 mb-2">
-              {llmHealth!.error || "Inference will fail until the server is running."} Start it for your OS ({os}):
-            </div>
-            <code className="block bg-black/50 px-3 py-1.5 rounded text-xs font-mono text-amber-100 select-all">{instructions.command}</code>
-            <div className="text-xs text-amber-200/60 mt-1">{instructions.hint}</div>
+            {llmNeedsConfig ? (
+              <>
+                <div className="text-sm font-semibold text-amber-300 mb-1">
+                  No LLM model configured
+                </div>
+                <div className="text-xs text-amber-200/80 mb-2">
+                  {llmHealth!.error || "Inference will fail until a model is selected."} Add one in Settings — the server was never contacted.
+                </div>
+                <button
+                  onClick={() => setShowSettings(true)}
+                  className="text-xs font-semibold text-amber-100 underline hover:text-white"
+                >
+                  Open Settings
+                </button>
+              </>
+            ) : (
+              <>
+                <div className="text-sm font-semibold text-amber-300 mb-1">
+                  LLM server unreachable at {llmHealth!.api_base}
+                </div>
+                <div className="text-xs text-amber-200/80 mb-2">
+                  {llmHealth!.error || "Inference will fail until the server is running."} Start it for your OS ({os}):
+                </div>
+                <code className="block bg-black/50 px-3 py-1.5 rounded text-xs font-mono text-amber-100 select-all">{instructions.command}</code>
+                <div className="text-xs text-amber-200/60 mt-1">{instructions.hint}</div>
+              </>
+            )}
           </div>
           <button onClick={() => setBannerDismissed(true)} className="text-amber-300/60 hover:text-amber-300 text-sm" aria-label="Dismiss">✕</button>
         </div>
@@ -845,7 +873,7 @@ export default function Home() {
                 {isLocalProvider(config.llm_provider) && (
                   <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }}>
                     <label className="text-xs text-neutral-500 uppercase tracking-widest mb-2 block">3. API Base URL (Ollama / vLLM / OpenAI-compatible)</label>
-                    <input value={config.llm_api_base} onChange={e => setConfig({ ...config, llm_api_base: e.target.value })} placeholder="http://localhost:11434/v1" className="w-full bg-black/80 border border-white/10 rounded-lg p-3 text-sm font-mono text-neutral-300 outline-none focus:border-purple-500 shadow-inner" />
+                    <input value={config.llm_api_base} onChange={e => setConfig({ ...config, llm_api_base: e.target.value })} placeholder="http://host.docker.internal:11434/v1" className="w-full bg-black/80 border border-white/10 rounded-lg p-3 text-sm font-mono text-neutral-300 outline-none focus:border-purple-500 shadow-inner" />
                   </motion.div>
                 )}
 
