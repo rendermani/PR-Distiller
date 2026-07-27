@@ -41,7 +41,7 @@ class TestAuthDisabledByDefault(unittest.TestCase):
 
     def test_post_config_succeeds_without_auth_when_token_unset(self):
         with patch.object(api.settings, "API_AUTH_TOKEN", ""):
-            r = self.client.post("/api/config", json={"llm_model": "x"})
+            r = self.client.post("/api/config", json={"embedding_model": "x"})
         self.assertEqual(r.status_code, 200)
 
     def test_delete_repo_rules_succeeds_without_auth_when_token_unset(self):
@@ -61,14 +61,14 @@ class TestAuthEnforced(unittest.TestCase):
 
     def test_post_config_returns_401_without_auth_header(self):
         with patch.object(api.settings, "API_AUTH_TOKEN", self.token):
-            r = self.client.post("/api/config", json={"llm_model": "x"})
+            r = self.client.post("/api/config", json={"embedding_model": "x"})
         self.assertEqual(r.status_code, 401)
 
     def test_post_config_returns_401_with_wrong_token(self):
         with patch.object(api.settings, "API_AUTH_TOKEN", self.token):
             r = self.client.post(
                 "/api/config",
-                json={"llm_model": "x"},
+                json={"embedding_model": "x"},
                 headers={"Authorization": "Bearer wrong"},
             )
         self.assertEqual(r.status_code, 401)
@@ -77,7 +77,7 @@ class TestAuthEnforced(unittest.TestCase):
         with patch.object(api.settings, "API_AUTH_TOKEN", self.token):
             r = self.client.post(
                 "/api/config",
-                json={"llm_model": "x"},
+                json={"embedding_model": "x"},
                 headers={"Authorization": f"Bearer {self.token}"},
             )
         self.assertEqual(r.status_code, 200)
@@ -118,7 +118,19 @@ class TestPublicByDesignEndpoints(unittest.TestCase):
         with patch.object(api.settings, "API_AUTH_TOKEN", "any-token"), \
              patch("requests.get") as mock_get:
             mock_get.return_value = MagicMock(status_code=200)
-            api.conf_manager.load_config.return_value = {"llm_api_base": "http://localhost:11434/v1"}
+            api.conf_manager.load_config.return_value = {
+                "llm_models_active": ["ollama-local"],
+                "llm_models": [
+                    {
+                        "id": "ollama-local",
+                        "label": "Ollama Local",
+                        "model": "ollama/qwen3:8b",
+                        "api_base": "http://localhost:11434/v1",
+                        "api_key_override": "",
+                        "enabled": True,
+                    }
+                ],
+            }
             r = self.client.get("/api/health/llm")
         self.assertEqual(r.status_code, 200)
 

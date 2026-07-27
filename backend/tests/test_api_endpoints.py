@@ -40,10 +40,11 @@ def _make_conf_mock(config: dict = None):
     conf = MagicMock()
     conf.load_config.return_value = config or {
         "github_token": "",
-        "llm_api_key": "",
-        "llm_provider": "ollama",
-        "llm_api_base": "http://localhost:11434/v1",
-        "llm_model": "ollama/qwen3:8b",
+        "huggingface_token": "",
+        "github_webhook_secret": "",
+        "llm_models": [],
+        "llm_models_active": [],
+        "provider_api_keys": {},
         "embedding_model": "BAAI/bge-base-en-v1.5",
         "repos": {},
         "provider_models": {},
@@ -74,34 +75,78 @@ class TestConfigEndpoints(unittest.TestCase):
 
     def test_get_config_redacts_github_token_when_set(self):
         api.conf_manager = _make_conf_mock(
-            config={"github_token": "secret", "llm_api_key": ""}
+            config={"github_token": "secret", "provider_api_keys": {}, "llm_models": []}
         )
         response = self.client.get("/api/config")
         self.assertEqual(response.json()["github_token"], "***")
 
-    def test_get_config_redacts_llm_api_key_when_set(self):
-        api.conf_manager = _make_conf_mock(
-            config={"github_token": "", "llm_api_key": "sk-hidden"}
-        )
+    def test_get_config_redacts_api_key_override_when_set(self):
+        """Per-entry api_key_override is masked in GET response."""
+        api.conf_manager = _make_conf_mock(config={
+            "github_token": "",
+            "huggingface_token": "",
+            "github_webhook_secret": "",
+            "llm_models": [
+                {
+                    "id": "x",
+                    "label": "X",
+                    "model": "openai/gpt-4o",
+                    "api_base": "https://api.openai.com/v1",
+                    "api_key_override": "sk-secret",
+                    "enabled": True,
+                }
+            ],
+            "llm_models_active": [],
+            "provider_api_keys": {},
+            "embedding_model": "",
+            "repos": {},
+            "provider_models": {},
+            "crawl_cursors": {},
+        })
         response = self.client.get("/api/config")
-        self.assertEqual(response.json()["llm_api_key"], "***")
+        self.assertEqual(response.json()["llm_models"][0]["api_key_override"], "***")
 
     def test_get_config_shows_empty_string_when_token_absent(self):
         response = self.client.get("/api/config")
         self.assertEqual(response.json()["github_token"], "")
 
     def test_post_config_returns_200(self):
-        response = self.client.post("/api/config", json={"llm_model": "new-model"})
+        """Valid llm_models payload returns 200."""
+        valid_entry = {
+            "id": "my-model",
+            "label": "My Model",
+            "model": "openai/gpt-4o",
+            "api_base": "https://api.openai.com/v1",
+            "api_key_override": "",
+            "enabled": True,
+        }
+        response = self.client.post(
+            "/api/config", json={"llm_models": [valid_entry], "llm_models_active": ["my-model"]}
+        )
         self.assertEqual(response.status_code, 200)
 
     def test_post_config_calls_save_config(self):
-        self.client.post("/api/config", json={"llm_model": "updated"})
-        api.conf_manager.save_config.assert_called_once_with({"llm_model": "updated"})
+        """POST /api/config forwards payload to ConfigManager.save_config."""
+        valid_entry = {
+            "id": "my-model",
+            "label": "My Model",
+            "model": "openai/gpt-4o",
+            "api_base": "https://api.openai.com/v1",
+            "api_key_override": "",
+            "enabled": True,
+        }
+        self.client.post(
+            "/api/config", json={"llm_models": [valid_entry], "llm_models_active": ["my-model"]}
+        )
+        api.conf_manager.save_config.assert_called_once()
+        saved = api.conf_manager.save_config.call_args[0][0]
+        self.assertIn("llm_models", saved)
+        self.assertEqual(saved["llm_models_active"], ["my-model"])
 
     def test_post_config_rejects_unknown_top_level_keys(self):
         """Unknown payload keys must produce a 422 instead of being silently persisted."""
         response = self.client.post(
-            "/api/config", json={"llm_model": "x", "totally_made_up_field": "evil"}
+            "/api/config", json={"embedding_model": "x", "totally_made_up_field": "evil"}
         )
         self.assertEqual(response.status_code, 422)
 
@@ -120,8 +165,8 @@ class TestConfigEndpoints(unittest.TestCase):
         api.conf_manager = _make_conf_mock(
             config={
                 "github_token": "",
-                "llm_api_key": "",
                 "provider_api_keys": {"openai": "sk-real", "anthropic": ""},
+                "llm_models": [],
             }
         )
         body = self.client.get("/api/config").json()
@@ -138,9 +183,9 @@ class TestConfigEndpoints(unittest.TestCase):
         body = r.json()
         self.assertNotEqual(body.get("huggingface_token"), "hf_real_secret")
         self.assertNotEqual(body.get("github_webhook_secret"), "wh_real_secret")
-        # Either redaction sentinel or empty string — matching existing convention.
-        self.assertIn(body.get("huggingface_token"), ("***", "", None))
-        self.assertIn(body.get("github_webhook_secret"), ("***", "", None))
+        # _redact_sensitive_fields always writes the field (either '***' or '').
+        self.assertIn(body["huggingface_token"], ("***", ""))
+        self.assertIn(body["github_webhook_secret"], ("***", ""))
 
     def test_get_config_requires_auth_when_token_set(self):
         with patch.object(api.settings, "API_AUTH_TOKEN", "secret"):
@@ -156,6 +201,72 @@ class TestConfigEndpoints(unittest.TestCase):
         r = self.client.post("/api/config", json={"github_webhook_secret": "wh"})
         self.assertEqual(r.status_code, 200)
         api.conf_manager.save_config.assert_called_with({"github_webhook_secret": "wh"})
+
+    def test_post_config_validates_entries(self):
+        """Invalid llm_models entry (missing required fields) returns 400."""
+        # Entry is missing 'label', 'model', 'api_base', 'api_key_override', 'enabled'.
+        bad_entry = {"id": "bad-entry"}
+        r = self.client.post("/api/config", json={"llm_models": [bad_entry]})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("missing required field", r.json()["detail"])
+
+    def test_post_config_preserves_masked_api_key_override(self):
+        """If a PUT'd entry has api_key_override='***', the stored plaintext must survive."""
+        stored_entry = {
+            "id": "my-model",
+            "label": "My Model",
+            "model": "openai/gpt-4o",
+            "api_base": "https://api.openai.com/v1",
+            "api_key_override": "sk-real-secret",
+            "enabled": True,
+        }
+        api.conf_manager = _make_conf_mock(config={
+            "llm_models": [stored_entry],
+            "llm_models_active": ["my-model"],
+            "provider_api_keys": {},
+            "github_token": "",
+            "huggingface_token": "",
+            "github_webhook_secret": "",
+            "embedding_model": "",
+            "repos": {},
+            "provider_models": {},
+            "crawl_cursors": {},
+        })
+        # Simulate UI round-tripping the masked value.
+        masked_entry = {**stored_entry, "api_key_override": "***"}
+        r = self.client.post("/api/config", json={"llm_models": [masked_entry]})
+        self.assertEqual(r.status_code, 200)
+        saved = api.conf_manager.save_config.call_args[0][0]
+        saved_key = saved["llm_models"][0]["api_key_override"]
+        # The API layer must have restored the plaintext, not left "***" or "".
+        self.assertEqual(saved_key, "sk-real-secret")
+
+    def test_get_config_entry_without_override_shows_empty_string(self):
+        """An llm_models entry with no api_key_override must show '' (not '***') in GET."""
+        api.conf_manager = _make_conf_mock(config={
+            "github_token": "",
+            "huggingface_token": "",
+            "github_webhook_secret": "",
+            "llm_models": [
+                {
+                    "id": "no-key-entry",
+                    "label": "No Key",
+                    "model": "ollama/qwen3:8b",
+                    "api_base": "http://localhost:11434/v1",
+                    "api_key_override": "",
+                    "enabled": True,
+                }
+            ],
+            "llm_models_active": [],
+            "provider_api_keys": {},
+            "embedding_model": "",
+            "repos": {},
+            "provider_models": {},
+            "crawl_cursors": {},
+        })
+        r = self.client.get("/api/config")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["llm_models"][0]["api_key_override"], "")
 
 
 class TestHealthEndpoints(unittest.TestCase):
@@ -203,8 +314,21 @@ class TestHealthEndpoints(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json().get("status"), "ok")
 
-    @patch("api._requests" if False else "requests.get")  # patch requests.get
+    @patch("requests.get")
     def test_llm_health_reachable(self, mock_get):
+        api.conf_manager = _make_conf_mock(config={
+            "llm_models_active": ["ollama-local"],
+            "llm_models": [
+                {
+                    "id": "ollama-local",
+                    "label": "Ollama Local",
+                    "model": "ollama/qwen3:8b",
+                    "api_base": "http://localhost:11434/v1",
+                    "api_key_override": "",
+                    "enabled": True,
+                }
+            ],
+        })
         mock_get.return_value = MagicMock(status_code=200)
         r = self.client.get("/api/health/llm")
         body = r.json()
@@ -213,11 +337,46 @@ class TestHealthEndpoints(unittest.TestCase):
     @patch("requests.get")
     def test_llm_health_unreachable(self, mock_get):
         import requests as _r
+        api.conf_manager = _make_conf_mock(config={
+            "llm_models_active": ["ollama-local"],
+            "llm_models": [
+                {
+                    "id": "ollama-local",
+                    "label": "Ollama Local",
+                    "model": "ollama/qwen3:8b",
+                    "api_base": "http://localhost:11434/v1",
+                    "api_key_override": "",
+                    "enabled": True,
+                }
+            ],
+        })
         mock_get.side_effect = _r.ConnectionError("refused")
         r = self.client.get("/api/health/llm")
         body = r.json()
         self.assertFalse(body["reachable"])
         self.assertIn("Could not reach", body["error"])
+
+    def test_health_llm_no_active_returns_unreachable(self):
+        """When llm_models_active is empty, health check returns reachable=False."""
+        api.conf_manager = _make_conf_mock(config={
+            "llm_models_active": [],
+            "llm_models": [],
+        })
+        r = self.client.get("/api/health/llm")
+        body = r.json()
+        self.assertFalse(body["reachable"])
+        self.assertIn("No active LLM", body["error"])
+
+    def test_health_llm_active_model_not_in_registry_returns_error(self):
+        """When the active model id is not in the registry, return reachable=False with error."""
+        api.conf_manager = _make_conf_mock(config={
+            "llm_models_active": ["ghost-model"],
+            "llm_models": [],
+        })
+        r = self.client.get("/api/health/llm")
+        body = r.json()
+        self.assertFalse(body["reachable"])
+        self.assertIn("not found in registry", body["error"])
 
 
 class TestRulesEndpoints(unittest.TestCase):

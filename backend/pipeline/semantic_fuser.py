@@ -1,15 +1,16 @@
-import os
 import json
 import uuid
 from litellm import completion
 from db.lightrag_manager import LightRAGManager
-import settings
 
 
 def _qwen_extra_body(model: str) -> dict:
-    """See llm.extractor._qwen_extra_body — duplicated to avoid circular import."""
+    """Disable Qwen3 thinking for fast merge calls. Ollama's native /api/chat
+    honours `think: false` to suppress the reasoning chain entirely, cutting
+    latency from ~30s to ~3s per merge.
+    """
     if "qwen" in (model or "").lower():
-        return {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}}
+        return {"extra_body": {"think": False}}
     return {}
 
 
@@ -42,14 +43,16 @@ class SemanticFuser:
         api_key: str | None = None,
     ):
         self.db = db_manager
-        # Per-instance config; env vars are only consulted when None is passed.
-        self.model = model or os.environ.get("EXTRACTOR_MODEL", settings.LLM_MODEL)
-        self.api_base = api_base or os.environ.get("EXTRACTOR_API_BASE", settings.LLM_API_BASE)
-        self.api_key = (
-            api_key
-            or os.environ.get("EXTRACTOR_API_KEY", settings.LLM_API_KEY)
-            or "unused"
-        )
+        # The extractor (and orchestrator behind it) are the single source of
+        # truth for model config. If None is passed the LLM merge call will
+        # fail loudly — that is intentional.
+        self.model = model
+        resolved_base = api_base
+        # LiteLLM's native ollama/ provider must NOT receive a /v1 suffix.
+        if self.model and self.model.startswith("ollama/") and resolved_base and resolved_base.endswith("/v1"):
+            resolved_base = resolved_base[:-3]
+        self.api_base = resolved_base
+        self.api_key = api_key or "unused"
 
     def process_and_fuse(self, new_rule_json: dict):
         """
@@ -67,7 +70,7 @@ class SemanticFuser:
             return None
 
         # 1. Execute purely mathematical Vector Distance checking against the database explicitly isolated natively to the target Git Repository
-        matched_id, matched_doc, matched_metadatas = self.db.find_similar_rule(document_text, repo=repo, distance_threshold=0.32)
+        matched_id, matched_doc, matched_metadatas = self.db.find_similar_rule(document_text, repo=repo, distance_threshold=0.22)
 
         if not matched_id:
             # Clean insertion if the vector is fundamentally distinct
@@ -108,14 +111,19 @@ class SemanticFuser:
                 temperature=0.1,
                 **_qwen_extra_body(self.model),
             )
-            raw_content = response.choices[0].message.content.strip()
+            msg = response.choices[0].message
+            raw_content = (msg.content or "").strip()
+            if not raw_content:
+                raw_content = (getattr(msg, "reasoning_content", None) or getattr(msg, "reasoning", None) or "").strip()
             if '</think>' in raw_content:
                 raw_content = raw_content.split('</think>')[-1].strip()
-
             if raw_content.startswith("```json"):
                 raw_content = raw_content.replace("```json", "").replace("```", "").strip()
-                
-            fused_rule = json.loads(raw_content)
+            elif raw_content.startswith("```"):
+                raw_content = raw_content.replace("```", "").strip()
+
+            decoder = json.JSONDecoder()
+            fused_rule, _ = decoder.raw_decode(raw_content.strip())
 
             # Keep the LLM's slug; store_rule namespaces it to a unique chroma
             # id (`<repo>__<slug>__<content-hash>`) and returns the canonical
@@ -162,6 +170,27 @@ class SemanticFuser:
             fused_rule["metadata"]["merge_count"] = old_merge_count + 1
             new_rule_id = new_rule_json.get("rule_id", "")
             fused_rule["metadata"]["merged_from"] = f"{matched_id},{new_rule_id}"
+
+            # Provenance lineage: which models contributed to this fused rule.
+            # ChromaDB metadata values must be str/int/float/bool — store as
+            # comma-joined string, consistent with path_patterns convention.
+            existing_models_raw = matched_metadatas.get("merged_with_models", "") if matched_metadatas else ""
+            existing_origin = matched_metadatas.get("extracted_by_model") if matched_metadatas else None
+            new_origin = new_rule_json.get("metadata", {}).get("extracted_by_model")
+
+            # Build a deduped ordered list from existing comma-joined string + both origins.
+            existing_models = [m for m in existing_models_raw.split(",") if m] if existing_models_raw else []
+            lineage = list(existing_models)
+            for origin in (existing_origin, new_origin):
+                if origin and origin not in lineage:
+                    lineage.append(origin)
+            fused_rule["metadata"]["merged_with_models"] = ",".join(lineage)
+            # Keep the first extractor as the canonical extracted_by; falls back
+            # to new_origin if the existing rule pre-dates Task 4.
+            if existing_origin:
+                fused_rule["metadata"]["extracted_by_model"] = existing_origin
+            elif new_origin:
+                fused_rule["metadata"]["extracted_by_model"] = new_origin
 
             # 3. Store first so we have the canonical chroma id, then archive
             # the old rule pointing at it, then delete the old rule. archive

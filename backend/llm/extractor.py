@@ -1,10 +1,8 @@
-import os
 import json
 import asyncio
 from litellm import completion, acompletion
 from db.lightrag_manager import LightRAGManager
 from pipeline.semantic_fuser import SemanticFuser
-import settings
 
 
 def _qwen_extra_body(model: str) -> dict:
@@ -16,6 +14,19 @@ def _qwen_extra_body(model: str) -> dict:
     """
     if "qwen" in (model or "").lower():
         return {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}}
+    return {}
+
+
+def _qwen_no_think(model: str) -> dict:
+    """Extra body kwargs that disable Qwen3 thinking for fast classify calls.
+
+    Ollama's native /api/chat honours a top-level `think: false` field which
+    suppresses the reasoning chain entirely, cutting latency from ~15s to ~0.3s.
+    LiteLLM passes extra_body keys through to the Ollama request body.
+    Safe to pass to non-Qwen models — unknown keys are ignored.
+    """
+    if "qwen" in (model or "").lower():
+        return {"extra_body": {"think": False}}
     return {}
 
 
@@ -34,17 +45,17 @@ class LargeLLMExtractor:
         model: str | None = None,
         api_base: str | None = None,
         api_key: str | None = None,
+        model_id: str | None = None,
+        model_label: str | None = None,
     ):
-        # Per-instance config; env vars are only consulted when the caller
-        # passes None, preserving the orchestrator's old contract while
-        # eliminating cross-job leakage when explicit values are supplied.
-        self.model = model or os.environ.get("EXTRACTOR_MODEL", settings.LLM_MODEL)
-        self.api_base = api_base or os.environ.get("EXTRACTOR_API_BASE", settings.LLM_API_BASE)
-        self.api_key = (
-            api_key
-            or os.environ.get("EXTRACTOR_API_KEY", settings.LLM_API_KEY)
-            or "unused"
-        )
+        # The orchestrator is the single source of truth for model config.
+        # If model or api_base are None here, the LLM call will fail loudly —
+        # that is intentional; the orchestrator must always pass explicit values.
+        self.model = model
+        self.api_base = api_base
+        self.api_key = api_key or "unused"
+        self.model_id = model_id
+        self.model_label = model_label
         self.db = db_manager
         self.fuser = SemanticFuser(
             db_manager, model=self.model, api_base=self.api_base, api_key=self.api_key
@@ -103,7 +114,12 @@ class LargeLLMExtractor:
         """Strips optional markdown fences and parses the JSON response from the LLM."""
         if raw_content.startswith("```json"):
             raw_content = raw_content.replace("```json", "").replace("```", "").strip()
-        return json.loads(raw_content)
+        elif raw_content.startswith("```"):
+            raw_content = raw_content.replace("```", "").strip()
+        # Extract just the first JSON object — models sometimes append extra text.
+        decoder = json.JSONDecoder()
+        obj, _ = decoder.raw_decode(raw_content.strip())
+        return obj
 
     def _apply_metadata(self, rule_dict: dict, repo: str) -> dict:
         """
@@ -145,9 +161,12 @@ class LargeLLMExtractor:
                 api_base=self.api_base,
                 api_key=self.api_key,
                 temperature=0.1,
-                **_qwen_extra_body(self.model),
+                **_qwen_no_think(self.model),
             )
-            raw_content = response.choices[0].message.content.strip()
+            msg = response.choices[0].message
+            raw_content = (msg.content or "").strip()
+            if not raw_content:
+                raw_content = (getattr(msg, "reasoning_content", None) or getattr(msg, "reasoning", None) or "").strip()
             if '</think>' in raw_content:
                 raw_content = raw_content.split('</think>')[-1].strip()
             rule_dict = self._parse_llm_response(raw_content)
@@ -158,6 +177,11 @@ class LargeLLMExtractor:
                 return None
 
             self._apply_metadata(rule_dict, repo)
+            if self.model_id:
+                rule_dict["metadata"]["extracted_by_model"] = self.model_id
+            if self.model_label:
+                rule_dict["metadata"]["extracted_by_label"] = self.model_label
+            rule_dict["metadata"].setdefault("merged_with_models", [])
             self.fuser.process_and_fuse(rule_dict)
             return rule_dict
 
@@ -178,9 +202,15 @@ class LargeLLMExtractor:
                 api_base=self.api_base,
                 api_key=self.api_key,
                 temperature=0.1,
-                **_qwen_extra_body(self.model),
+                # Disable Qwen3 thinking on extract too — the JSON output
+                # doesn't need a reasoning chain and thinking turns ~3s calls
+                # into ~30s calls, multiplied across thousands of payloads.
+                **_qwen_no_think(self.model),
             )
-            raw_content = response.choices[0].message.content.strip()
+            msg = response.choices[0].message
+            raw_content = (msg.content or "").strip()
+            if not raw_content:
+                raw_content = (getattr(msg, "reasoning_content", None) or getattr(msg, "reasoning", None) or "").strip()
             if '</think>' in raw_content:
                 raw_content = raw_content.split('</think>')[-1].strip()
             rule_dict = self._parse_llm_response(raw_content)
@@ -190,14 +220,26 @@ class LargeLLMExtractor:
                 return None
 
             self._apply_metadata(rule_dict, repo)
-            self.fuser.process_and_fuse(rule_dict)
+            if self.model_id:
+                rule_dict["metadata"]["extracted_by_model"] = self.model_id
+            if self.model_label:
+                rule_dict["metadata"]["extracted_by_label"] = self.model_label
+            rule_dict["metadata"].setdefault("merged_with_models", [])
+            # process_and_fuse is synchronous (ChromaDB + optional LLM merge).
+            # Run it in a thread so the event loop stays free to serve HTTP
+            # requests and fire progress callbacks between extractions.
+            await asyncio.to_thread(self.fuser.process_and_fuse, rule_dict)
             return rule_dict
         except Exception as e:
             print(f"[Async Extractor Error]: {e}")
             return None
 
     async def _async_classify(self, comment: str) -> bool:
-        """Fast binary classifier — returns True if worth extracting."""
+        """Fast binary classifier — returns True if worth extracting.
+
+        Uses think:false (Ollama native) to skip Qwen3's reasoning chain,
+        cutting latency from ~15s to ~0.3s per call.
+        """
         try:
             response = await acompletion(
                 model=self.model,
@@ -208,27 +250,95 @@ class LargeLLMExtractor:
                 api_base=self.api_base,
                 api_key=self.api_key,
                 temperature=0.0,
-                max_tokens=64,
-                **_qwen_extra_body(self.model),
+                max_tokens=16,
+                **_qwen_no_think(self.model),
             )
-            raw = response.choices[0].message.content.strip()
-            # Strip Qwen3 reasoning if the model ignored enable_thinking=False.
+            msg = response.choices[0].message
+            raw = (msg.content or "").strip()
+            if not raw:
+                raw = (getattr(msg, "reasoning_content", None) or getattr(msg, "reasoning", None) or "").strip()
             if '</think>' in raw:
                 raw = raw.split('</think>')[-1].strip()
             return 'EXTRACT' in raw.upper()
         except Exception:
             return True  # err on side of caution
 
-    async def batch_extract(self, payloads: list, repo: str) -> list:
-        # Pass 1: fast classify all comments in parallel
-        classify_tasks = [self._async_classify(c) for (c, _) in payloads]
-        classifications = await asyncio.gather(*classify_tasks)
+    # Maximum concurrent LLM requests. Ollama on Apple Silicon with Metal can
+    # handle several requests in flight; more than ~4 just queues without
+    # gaining throughput. Classify uses /no_think so it is fast; extract is
+    # slower but still benefits from a few slots of overlap.
+    LLM_CONCURRENCY = 4
+
+    async def batch_extract(self, payloads: list, repo: str, progress_callback=None) -> list:
+        """Two-pass extract. progress_callback(status_str, pct_int) is called after
+        each classify and extract completion so the UI stays live."""
+        total = len(payloads)
+        sem = asyncio.Semaphore(self.LLM_CONCURRENCY)
+
+        async def _classify_one(comment: str) -> bool:
+            async with sem:
+                return await self._async_classify(comment)
+
+        async def _extract_one(comment: str, diff: str) -> dict:
+            async with sem:
+                return await self.async_extract_rule(comment, diff, repo)
+
+        # Pass 1: classify — bounded concurrency, report per-completion
+        classify_tasks = [
+            asyncio.ensure_future(_classify_one(c))
+            for c, _ in payloads
+        ]
+        classifications = [None] * total
+        done_count = 0
+        for coro in asyncio.as_completed(classify_tasks):
+            try:
+                await coro
+            except Exception:
+                pass  # tolerate individual failures; see the done/result scan below
+            # Map back: find the first task that is done and unrecorded
+            for i, t in enumerate(classify_tasks):
+                if t.done() and classifications[i] is None:
+                    try:
+                        classifications[i] = t.result()
+                    except Exception:
+                        classifications[i] = True
+            done_count += 1
+            if progress_callback:
+                pct = 35 + int(done_count / total * 25)  # 35→60%
+                progress_callback(f"Classifying {done_count}/{total} comments...", pct)
+
+        # Resolve any remaining None slots
+        for i, v in enumerate(classifications):
+            if v is None:
+                classifications[i] = True
 
         keepers = [(c, d) for (c, d), keep in zip(payloads, classifications) if keep]
-        skipped = len(payloads) - len(keepers)
-        print(f"[Two-Pass] Classified {len(payloads)} -> {len(keepers)} to extract, {skipped} skipped")
+        skipped = total - len(keepers)
+        print(f"[Two-Pass] Classified {total} -> {len(keepers)} to extract, {skipped} skipped")
+        if progress_callback:
+            progress_callback(f"Classified {len(keepers)}/{total} for extraction ({skipped} skipped)", 60)
 
-        # Pass 2: extract only the keepers
-        extract_tasks = [self.async_extract_rule(c, a, repo) for (c, a) in keepers]
-        results = await asyncio.gather(*extract_tasks)
-        return [r for r in results if r is not None]
+        # Pass 2: extract keepers — bounded concurrency, report per-completion
+        extract_tasks = [
+            asyncio.ensure_future(_extract_one(c, a))
+            for c, a in keepers
+        ]
+        results = [None] * len(keepers)
+        done_count = 0
+        for coro in asyncio.as_completed(extract_tasks):
+            try:
+                await coro
+            except Exception:
+                pass
+            for i, t in enumerate(extract_tasks):
+                if t.done() and results[i] is None:
+                    try:
+                        results[i] = t.result()
+                    except Exception:
+                        results[i] = False
+            done_count += 1
+            if progress_callback:
+                pct = 60 + int(done_count / max(len(keepers), 1) * 35)  # 60→95%
+                progress_callback(f"Extracting rules {done_count}/{len(keepers)}...", pct)
+
+        return [r for r in results if r and r is not False]

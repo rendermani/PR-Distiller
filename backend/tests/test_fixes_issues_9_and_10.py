@@ -95,7 +95,26 @@ class TestOrchestratorPreProcessing(unittest.IsolatedAsyncioTestCase):
     """
     Verify that _execute_distillation applies hash dedup and PII redaction
     to crawled tuples before passing them to batch_extract.
+
+    Updated for Task 4 multi-model schema: config uses llm_models / llm_models_active.
     """
+
+    def _multi_model_config(self):
+        return {
+            "github_token": "",
+            "llm_models": [
+                {
+                    "id": "test-model",
+                    "label": "Test Model",
+                    "model": "ollama/test-model:latest",
+                    "api_base": "http://localhost:11434",
+                    "api_key_override": "",
+                    "enabled": True,
+                }
+            ],
+            "llm_models_active": ["test-model"],
+            "provider_api_keys": {},
+        }
 
     async def test_duplicate_comments_are_dropped_before_extraction(self):
         """
@@ -106,6 +125,7 @@ class TestOrchestratorPreProcessing(unittest.IsolatedAsyncioTestCase):
         from db.lightrag_manager import LightRAGManager
 
         mock_db = MagicMock(spec=LightRAGManager)
+        mock_db.delete_repo_rules = MagicMock(return_value=0)
         orchestrator = JobOrchestrator(mock_db)
 
         job_id = "test-job-dedup"
@@ -120,7 +140,7 @@ class TestOrchestratorPreProcessing(unittest.IsolatedAsyncioTestCase):
 
         captured_payloads = []
 
-        async def fake_batch_extract(payloads, repo):
+        async def fake_batch_extract(payloads, repo, progress_callback=None):
             captured_payloads.extend(payloads)
             return []
 
@@ -145,8 +165,7 @@ class TestOrchestratorPreProcessing(unittest.IsolatedAsyncioTestCase):
             await orchestrator._execute_distillation(
                 job_id,
                 {"repo": "encode/starlette", "months": 1, "use_cache": False},
-                {"github_token": "", "llm_api_base": "http://localhost/v1",
-                 "llm_api_key": "key", "llm_model": "test-model"},
+                self._multi_model_config(),
             )
 
         # Only one unique comment should have reached batch_extract
@@ -162,6 +181,7 @@ class TestOrchestratorPreProcessing(unittest.IsolatedAsyncioTestCase):
         from db.lightrag_manager import LightRAGManager
 
         mock_db = MagicMock(spec=LightRAGManager)
+        mock_db.delete_repo_rules = MagicMock(return_value=0)
         orchestrator = JobOrchestrator(mock_db)
 
         job_id = "test-job-redact"
@@ -174,7 +194,7 @@ class TestOrchestratorPreProcessing(unittest.IsolatedAsyncioTestCase):
 
         captured_payloads = []
 
-        async def fake_batch_extract(payloads, repo):
+        async def fake_batch_extract(payloads, repo, progress_callback=None):
             captured_payloads.extend(payloads)
             return []
 
@@ -200,8 +220,7 @@ class TestOrchestratorPreProcessing(unittest.IsolatedAsyncioTestCase):
             await orchestrator._execute_distillation(
                 job_id,
                 {"repo": "encode/starlette", "months": 1, "use_cache": False},
-                {"github_token": "", "llm_api_base": "http://localhost/v1",
-                 "llm_api_key": "key", "llm_model": "test-model"},
+                self._multi_model_config(),
             )
 
         self.assertEqual(len(captured_payloads), 1)
@@ -216,6 +235,7 @@ class TestOrchestratorPreProcessing(unittest.IsolatedAsyncioTestCase):
         from db.lightrag_manager import LightRAGManager
 
         mock_db = MagicMock(spec=LightRAGManager)
+        mock_db.delete_repo_rules = MagicMock(return_value=0)
         orchestrator = JobOrchestrator(mock_db)
 
         job_id = "test-job-both"
@@ -232,7 +252,7 @@ class TestOrchestratorPreProcessing(unittest.IsolatedAsyncioTestCase):
 
         captured_payloads = []
 
-        async def fake_batch_extract(payloads, repo):
+        async def fake_batch_extract(payloads, repo, progress_callback=None):
             captured_payloads.extend(payloads)
             return []
 
@@ -258,8 +278,7 @@ class TestOrchestratorPreProcessing(unittest.IsolatedAsyncioTestCase):
             await orchestrator._execute_distillation(
                 job_id,
                 {"repo": "encode/starlette", "months": 1, "use_cache": False},
-                {"github_token": "", "llm_api_base": "http://localhost/v1",
-                 "llm_api_key": "key", "llm_model": "test-model"},
+                self._multi_model_config(),
             )
 
         # Duplicate dropped → only 1 payload, and it must be the redacted version

@@ -31,6 +31,9 @@ def _completion_response(content: str):
 
 class TestQwenGating(unittest.TestCase):
     def test_extra_body_sent_for_qwen_model(self):
+        # _async_classify uses _qwen_no_think (Ollama native think:false)
+        # to skip Qwen3 reasoning chain — ~50x faster than the chat-template
+        # `enable_thinking=False` route.
         extractor = _make_extractor("ollama/qwen3:8b")
         with patch("llm.extractor.acompletion", new=MagicMock()) as mock_acompletion:
             async def fake(*a, **kw):
@@ -39,9 +42,7 @@ class TestQwenGating(unittest.TestCase):
             asyncio.run(extractor._async_classify("comment"))
         kwargs = mock_acompletion.call_args.kwargs
         self.assertIn("extra_body", kwargs)
-        self.assertEqual(
-            kwargs["extra_body"], {"chat_template_kwargs": {"enable_thinking": False}}
-        )
+        self.assertEqual(kwargs["extra_body"], {"think": False})
 
     def test_extra_body_omitted_for_gpt_model(self):
         extractor = _make_extractor("openai/gpt-4o")

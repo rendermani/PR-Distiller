@@ -15,6 +15,7 @@ from llm.extractor import LargeLLMExtractor
 from db.lightrag_manager import LightRAGManager
 from pipeline.config_manager import ConfigManager
 from pipeline.deduplication import DeduplicationFilter
+from pipeline.model_registry import resolve_model, ModelRegistryError
 from pipeline import dev_cache, SecurityRedactor
 
 class JobOrchestrator:
@@ -72,10 +73,6 @@ class JobOrchestrator:
             self.active_jobs[job_id]["status"] = f"Spidering {repo} ({months} months)"
             self.active_jobs[job_id]["progress"] = 10
 
-            def set_spider_status(msg):
-                if job_id in self.active_jobs:
-                    self.active_jobs[job_id]["status"] = msg
-
             def check_cancel():
                 return self.cancel_flags.get(job_id, False)
 
@@ -90,9 +87,23 @@ class JobOrchestrator:
                 self.active_jobs[job_id]["status"] = f"Using dev cache ({info['count']} tuples from {info['updated_at'][:10]})"
                 pr_data = await asyncio.to_thread(dev_cache.load_crawl, repo)
             else:
-                # 1a. Crawl inline PR comments
+                # Each crawler phase gets its own status callback that also
+                # updates the numeric progress within that phase's range so the
+                # UI shows live page-by-page advancement instead of a frozen bar.
+
+                # Phase 1a: inline PR comments — 10 → 18 %
+                _phase_a_page = [0]
+                def _status_a(msg: str) -> None:
+                    if job_id not in self.active_jobs:
+                        return
+                    _phase_a_page[0] += 1
+                    # Each page nudges forward by 1 % up to the phase ceiling.
+                    pct = min(10 + _phase_a_page[0], 18)
+                    self.active_jobs[job_id]["status"] = msg
+                    self.active_jobs[job_id]["progress"] = pct
+
                 pr_data, updated_cursors = await asyncio.to_thread(
-                    crawl_human_rejections, [repo], months, set_spider_status, check_cancel, cursors
+                    crawl_human_rejections, [repo], months, _status_a, check_cancel, cursors
                 )
                 current_conf["crawl_cursors"] = updated_cursors
                 self.conf.save_config(current_conf)
@@ -102,22 +113,42 @@ class JobOrchestrator:
                     self.active_jobs[job_id]["progress"] = -1
                     return
 
-                # 1b. Crawl top-level PR reviews
+                # Phase 1b: top-level PR reviews — 18 → 27 %
+                _phase_b_page = [0]
                 self.active_jobs[job_id]["status"] = f"Crawling PR reviews for {repo}..."
-                self.active_jobs[job_id]["progress"] = 20
+                self.active_jobs[job_id]["progress"] = 18
+
+                def _status_b(msg: str) -> None:
+                    if job_id not in self.active_jobs:
+                        return
+                    _phase_b_page[0] += 1
+                    pct = min(18 + _phase_b_page[0], 27)
+                    self.active_jobs[job_id]["status"] = msg
+                    self.active_jobs[job_id]["progress"] = pct
+
                 review_data, updated_cursors = await asyncio.to_thread(
-                    crawl_pr_reviews, [repo], months, set_spider_status, check_cancel, updated_cursors
+                    crawl_pr_reviews, [repo], months, _status_b, check_cancel, updated_cursors
                 )
                 current_conf["crawl_cursors"] = updated_cursors
                 self.conf.save_config(current_conf)
 
                 pr_data.extend(review_data)
 
-                # 1c. Crawl closed issues for architectural lessons
+                # Phase 1c: closed issues — 27 → 35 %
+                _phase_c_page = [0]
                 self.active_jobs[job_id]["status"] = f"Crawling closed issues for {repo}..."
-                self.active_jobs[job_id]["progress"] = 30
+                self.active_jobs[job_id]["progress"] = 27
+
+                def _status_c(msg: str) -> None:
+                    if job_id not in self.active_jobs:
+                        return
+                    _phase_c_page[0] += 1
+                    pct = min(27 + _phase_c_page[0], 35)
+                    self.active_jobs[job_id]["status"] = msg
+                    self.active_jobs[job_id]["progress"] = pct
+
                 issue_data, updated_cursors = await asyncio.to_thread(
-                    crawl_closed_issues, [repo], months, set_spider_status, check_cancel, updated_cursors
+                    crawl_closed_issues, [repo], months, _status_c, check_cancel, updated_cursors
                 )
                 current_conf["crawl_cursors"] = updated_cursors
                 self.conf.save_config(current_conf)
@@ -145,60 +176,131 @@ class JobOrchestrator:
                 safe_body = redactor.redact_text(comment_body) if redactor is not None else comment_body
                 cleaned_payloads.append((safe_body, diff_hunk))
 
-            # 3. Extract — pass per-job LLM config via constructor args so
-            # concurrent jobs cannot leak credentials through the process env.
-            llm_api_base = config.get("llm_api_base", "") or settings.LLM_API_BASE
-            # Local/vLLM servers don't require auth but LiteLLM+OpenAI-compat
-            # still demand a non-empty key; the extractor applies the same
-            # fallback in its own code path.
-            llm_api_key = (
-                config.get("llm_api_key", "") or settings.LLM_API_KEY or "unused"
-            )
-            llm_model = config.get("llm_model", "") or settings.LLM_MODEL
-            extractor = LargeLLMExtractor(
-                self.db, model=llm_model, api_base=llm_api_base, api_key=llm_api_key
-            )
+            # 3. Resolve active models from the registry. Skip unknown/disabled ids.
+            registry = config.get("llm_models", [])
+            active_ids = config.get("llm_models_active", [])
+            provider_keys = config.get("provider_api_keys", {})
 
-            # Preflight: fail loudly BEFORE wiping anything if the LLM is
-            # unreachable or the configured model is wrong. Previously a
-            # misconfigured run would 404 every extraction, silently wipe the
-            # repo's rules in dev-mode, and still report "Completed".
-            self.active_jobs[job_id]["status"] = f"Preflighting LLM ({llm_model})..."
-            try:
-                await acompletion(
-                    model=llm_model,
-                    messages=[{"role": "user", "content": "ping"}],
-                    api_base=llm_api_base,
-                    api_key=llm_api_key,
-                    max_tokens=1, temperature=0,
-                )
-            except Exception as exc:
-                raise RuntimeError(
-                    f"LLM preflight failed for model={llm_model} "
-                    f"base={llm_api_base}: {exc}"
-                ) from exc
+            if not active_ids:
+                raise RuntimeError("No models selected: llm_models_active is empty")
 
-            # Dev-mode replay: wipe existing rules now that we know the LLM
-            # works, so re-extraction starts from a clean slate instead of
-            # being dedup-merged into stale vectors from a prior run.
+            per_model_results: dict[str, dict] = {}
+            self.active_jobs[job_id]["per_model_results"] = per_model_results
+            total_attempted = len(cleaned_payloads)
+
+            # Dev-mode replay: wipe existing rules ONCE up front, not per-model,
+            # because each pass would otherwise wipe its predecessor's output.
             if use_cache and dev_cache.has_cache(repo):
                 removed = await asyncio.to_thread(self.db.delete_repo_rules, repo)
                 print(f"[Dev Mode] Cleared {removed} prior rules for {repo}")
 
-            self.active_jobs[job_id]["status"] = f"Batch Processing {len(cleaned_payloads)} rule payloads with {llm_model}"
-            self.active_jobs[job_id]["progress"] = 35
+            # Per-pass progress: divide the 35→95% range across N models.
+            n_models = len(active_ids)
+            pct_per_model = max(1, (95 - 35) // max(n_models, 1))
 
-            extracted = await extractor.batch_extract(cleaned_payloads, repo=repo)
-            extracted_count = len(extracted) if extracted else 0
-            attempted = len(cleaned_payloads)
-            if attempted > 0 and extracted_count == 0:
-                raise RuntimeError(
-                    f"All {attempted} extraction calls failed — check LLM logs. "
-                    f"No rules were stored."
+            # Sequential, not parallel: a single Ollama GPU can only serve one
+            # model at a time. Running passes concurrently just queues requests
+            # in Ollama without gaining throughput, while making per-model
+            # status text and progress reporting harder to track.
+            for idx, model_id in enumerate(active_ids):
+                if check_cancel():
+                    self.active_jobs[job_id]["status"] = "Pipeline Aborted via User Interrupt"
+                    self.active_jobs[job_id]["progress"] = -1
+                    return
+
+                entry = next((e for e in registry if e.get("id") == model_id), None)
+                label = entry.get("label", model_id) if entry else model_id
+
+                pass_pct_start = 35 + idx * pct_per_model
+                pass_pct_end = 35 + (idx + 1) * pct_per_model
+
+                self.active_jobs[job_id]["status"] = f"[{idx+1}/{n_models}] Preflighting {label}..."
+                self.active_jobs[job_id]["progress"] = pass_pct_start
+
+                try:
+                    resolved = resolve_model(model_id, registry, provider_keys)
+                except ModelRegistryError as exc:
+                    per_model_results[model_id] = {
+                        "label": label,
+                        "attempted": total_attempted,
+                        "extracted": 0,
+                        "failed_reason": str(exc),
+                    }
+                    continue
+
+                llm_model = resolved["model"]
+                llm_api_base = resolved["api_base"]
+                llm_api_key = resolved["api_key"]
+                # LiteLLM's native ollama/ provider rejects the /v1 suffix on api_base.
+                if llm_model.startswith("ollama/") and llm_api_base.endswith("/v1"):
+                    llm_api_base = llm_api_base[:-3]
+
+                try:
+                    await acompletion(
+                        model=llm_model,
+                        messages=[{"role": "user", "content": "ping"}],
+                        api_base=llm_api_base,
+                        api_key=llm_api_key,
+                        max_tokens=1, temperature=0,
+                    )
+                except Exception as exc:
+                    per_model_results[model_id] = {
+                        "label": label,
+                        "attempted": total_attempted,
+                        "extracted": 0,
+                        "failed_reason": f"Preflight failed: {exc}",
+                    }
+                    continue
+
+                extractor = LargeLLMExtractor(
+                    self.db,
+                    model=llm_model,
+                    api_base=llm_api_base,
+                    api_key=llm_api_key,
+                    model_id=model_id,
+                    model_label=label,
                 )
 
+                # Wrap the extractor's 35→95 internal range into this pass's slice.
+                # Closure binds (label, pass_pct_start, pass_pct_end) by default args
+                # so each pass's callback has its own values.
+                def _progress(msg: str, pct_inner: int,
+                              _label=label, _start=pass_pct_start, _end=pass_pct_end,
+                              _idx=idx, _n=n_models):
+                    # extractor reports 35→95; map to the pass's allocated slice.
+                    local_pct = max(0, min(60, pct_inner - 35))
+                    scaled = _start + (local_pct / 60.0) * (_end - _start)
+                    if job_id in self.active_jobs:
+                        self.active_jobs[job_id]["status"] = f"[{_idx+1}/{_n}] {_label}: {msg}"
+                        self.active_jobs[job_id]["progress"] = int(scaled)
+
+                try:
+                    extracted = await extractor.batch_extract(
+                        cleaned_payloads, repo=repo, progress_callback=_progress
+                    )
+                    per_model_results[model_id] = {
+                        "label": label,
+                        "attempted": total_attempted,
+                        "extracted": len(extracted) if extracted else 0,
+                    }
+                except Exception as exc:
+                    per_model_results[model_id] = {
+                        "label": label,
+                        "attempted": total_attempted,
+                        "extracted": 0,
+                        "failed_reason": str(exc),
+                    }
+                    continue
+
+            # Final summary.
+            total_extracted = sum(r.get("extracted", 0) for r in per_model_results.values())
+            summary_parts = [
+                f"{r['label']}: {r['extracted']}" + (" (FAILED)" if r.get("failed_reason") else "")
+                for r in per_model_results.values()
+            ]
             self.active_jobs[job_id]["status"] = (
-                f"Completed: {extracted_count}/{attempted} rules extracted"
+                f"Completed: {total_extracted} extractions across {n_models} model(s) — "
+                + ", ".join(summary_parts)
             )
             self.active_jobs[job_id]["progress"] = 100
 

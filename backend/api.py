@@ -246,10 +246,8 @@ class ConfigUpdate(BaseModel):
     github_token: str | None = None
     huggingface_token: str | None = None
     github_webhook_secret: str | None = None
-    llm_provider: str | None = None
-    llm_api_base: str | None = None
-    llm_model: str | None = None
-    llm_api_key: str | None = None  # legacy; merged into provider_api_keys[active_provider]
+    llm_models: list[dict] | None = None
+    llm_models_active: list[str] | None = None
     provider_api_keys: dict[str, str] | None = None
     embedding_model: str | None = None
     repos: dict | None = None
@@ -259,10 +257,16 @@ class ConfigUpdate(BaseModel):
 def _redact_sensitive_fields(config: dict) -> dict:
     """Return a copy of config with sensitive secrets replaced by '***' or ''."""
     redacted = dict(config)
-    for field in ("github_token", "llm_api_key", "github_webhook_secret", "huggingface_token"):
+    for field in ("github_token", "github_webhook_secret", "huggingface_token"):
         redacted[field] = "***" if config.get(field) else ""
     provider_keys = config.get("provider_api_keys", {})
     redacted["provider_api_keys"] = {p: "***" if k else "" for p, k in provider_keys.items()}
+    # Mask per-entry api_key_override values without dropping other fields.
+    llm_models = config.get("llm_models", [])
+    redacted["llm_models"] = [
+        {**entry, "api_key_override": "***" if entry.get("api_key_override") else ""}
+        for entry in llm_models
+    ]
     return redacted
 
 
@@ -352,16 +356,33 @@ def retry_embedding(clean: bool = False):
 
 @app.get("/api/health/llm")
 def check_llm_health():
-    """Reach the configured LLM_API_BASE to tell the UI whether inference will work.
+    """Reach the active LLM(s) to tell the UI whether inference will work.
 
+    With multi-model support, this probes the api_base of the first active
+    model. The UI shows a single banner; per-model status is implicit in the
+    job results.
     Returns {reachable, api_base, provider_hint, error?}.
     """
     import requests as _requests
 
     cfg = conf_manager.load_config()
-    api_base = (cfg.get("llm_api_base") or settings.LLM_API_BASE or "").rstrip("/")
+    active_ids = cfg.get("llm_models_active", [])
+    if not active_ids:
+        return {"reachable": False, "api_base": "", "error": "No active LLM models configured."}
+
+    # Only the first active model is probed — the UI renders a single health banner.
+    # Per-model status surfaces through job results, not the health endpoint.
+    registry = cfg.get("llm_models", [])
+    entry = next((e for e in registry if e.get("id") == active_ids[0]), None)
+    if entry is None:
+        return {
+            "reachable": False, "api_base": "",
+            "error": f"Active model id {active_ids[0]!r} not found in registry.",
+        }
+
+    api_base = (entry.get("api_base") or "").rstrip("/")
     if not api_base:
-        return {"reachable": False, "api_base": "", "error": "No LLM_API_BASE configured."}
+        return {"reachable": False, "api_base": "", "error": "Active model has no api_base configured."}
 
     # Heuristic: Ollama exposes /api/tags outside the OpenAI-compat prefix;
     # fall back to /models for OpenAI-compatible servers.
@@ -370,7 +391,8 @@ def check_llm_health():
         probes.append(api_base[:-3] + "/api/tags")
     probes.append(api_base + "/models")
 
-    hint = "ollama" if ":11434" in api_base else "openai-compatible"
+    # Use model-string prefix rather than port heuristic — robust to custom ports.
+    hint = "ollama" if entry.get("model", "").startswith("ollama/") else "openai-compatible"
     for url in probes:
         try:
             r = _requests.get(url, timeout=3)
@@ -401,22 +423,59 @@ def get_config(request: Request):
     payload["webhook_url"] = f"{public_base.rstrip('/')}/api/webhooks/github"
     return payload
 
-@app.post("/api/config", dependencies=[Depends(require_api_token)])
+@app.post(
+    "/api/config",
+    dependencies=[Depends(require_api_token)],
+    responses={400: {"description": "Malformed llm_models entry — see detail."}},
+)
 def update_config(payload: ConfigUpdate):
-    """Mutates global architecture settings from UI slider payloads natively.
+    """Updates the persisted configuration. All fields are optional; omitted
+    fields are left unchanged.
 
     Drops the redaction sentinel '***' so the UI can round-trip GET→POST
-    without overwriting real secrets with the placeholder. ConfigManager
-    re-applies the same filter defensively.
+    without overwriting real secrets with the placeholder. For per-entry
+    `api_key_override` set to '***', the stored plaintext is restored from
+    the current config before saving so masked round-trips don't clear keys.
+
+    Each incoming llm_models entry is validated via the model_registry
+    validator; malformed entries return HTTP 400 with the validator's error.
     """
+    from pipeline.model_registry import validate_entry, ModelRegistryError
+
     data = payload.model_dump(exclude_unset=True)
-    for field in ("github_token", "llm_api_key"):
-        if data.get(field) == "***":
-            data.pop(field)
+
+    if data.get("github_token") == "***":
+        data.pop("github_token")
+    if data.get("huggingface_token") == "***":
+        data.pop("huggingface_token")
+    if data.get("github_webhook_secret") == "***":
+        data.pop("github_webhook_secret")
+
     if "provider_api_keys" in data and isinstance(data["provider_api_keys"], dict):
         data["provider_api_keys"] = {
             p: k for p, k in data["provider_api_keys"].items() if k != "***"
         }
+
+    if "llm_models" in data:
+        try:
+            for entry in data["llm_models"]:
+                validate_entry(entry)
+        except ModelRegistryError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        # Preserve masked api_key_override values: when the UI re-POSTs a
+        # masked entry, look up the currently stored plaintext by id so the
+        # secret isn't dropped. Untouched entries keep their override.
+        # NOTE: non-atomic read-then-write — concurrent POSTs can race here.
+        # ConfigManager.save_config holds a file lock around the write, but
+        # this read is outside it. A merge-on-write helper inside
+        # ConfigManager is the correct long-term fix.
+        current = conf_manager.load_config()
+        current_by_id = {e["id"]: e for e in current.get("llm_models", [])}
+        for entry in data["llm_models"]:
+            if entry.get("api_key_override") == "***":
+                entry["api_key_override"] = current_by_id.get(entry["id"], {}).get("api_key_override", "")
+
     return conf_manager.save_config(data)
 
 @app.get("/api/cache/{repo:path}")
