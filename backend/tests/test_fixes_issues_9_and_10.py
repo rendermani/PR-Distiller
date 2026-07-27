@@ -140,7 +140,7 @@ class TestOrchestratorPreProcessing(unittest.IsolatedAsyncioTestCase):
 
         captured_payloads = []
 
-        async def fake_batch_extract(payloads, repo, progress_callback=None):
+        async def fake_batch_extract(payloads, repo, progress_callback=None, check_cancel=None):
             captured_payloads.extend(payloads)
             return []
 
@@ -194,7 +194,7 @@ class TestOrchestratorPreProcessing(unittest.IsolatedAsyncioTestCase):
 
         captured_payloads = []
 
-        async def fake_batch_extract(payloads, repo, progress_callback=None):
+        async def fake_batch_extract(payloads, repo, progress_callback=None, check_cancel=None):
             captured_payloads.extend(payloads)
             return []
 
@@ -252,7 +252,7 @@ class TestOrchestratorPreProcessing(unittest.IsolatedAsyncioTestCase):
 
         captured_payloads = []
 
-        async def fake_batch_extract(payloads, repo, progress_callback=None):
+        async def fake_batch_extract(payloads, repo, progress_callback=None, check_cancel=None):
             captured_payloads.extend(payloads)
             return []
 

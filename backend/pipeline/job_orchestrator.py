@@ -165,10 +165,20 @@ class JobOrchestrator:
                 return
 
             # 2. Pre-process: hash dedup + PII redaction before any LLM call.
-            # SecurityRedactor requires presidio; if unavailable comments are passed
-            # through unredacted (acceptable for local/dev deployments without NLP deps).
             dedup = DeduplicationFilter()
             redactor = SecurityRedactor() if SecurityRedactor is not None else None
+            if redactor is None:
+                # Record it on the job, not just in the logs: sending unredacted
+                # comment text to a third-party LLM is a decision the operator
+                # must be able to see after the fact.
+                warning = (
+                    "PII redaction DISABLED (presidio not installed) — "
+                    "comment text was sent to the LLM unredacted"
+                )
+                print(f"[!] {warning}")
+                self.active_jobs[job_id]["warnings"] = (
+                    self.active_jobs[job_id].get("warnings", []) + [warning]
+                )
             cleaned_payloads = []
             for comment_body, diff_hunk in pr_data:
                 if dedup.is_duplicate(comment_body):
@@ -196,7 +206,12 @@ class JobOrchestrator:
 
             # Per-pass progress: divide the 35→95% range across N models.
             n_models = len(active_ids)
-            pct_per_model = max(1, (95 - 35) // max(n_models, 1))
+            # Slice the 35→95 band across the models. Without the float division
+            # and clamp below, `max(1, 60 // n)` gave every model at least 1% and
+            # pushed the final pass past 95 once n > 60 (n=80 ended at 115%).
+            PASS_BAND_START, PASS_BAND_END = 35, 95
+            band = PASS_BAND_END - PASS_BAND_START
+            pct_per_model = band / max(n_models, 1)
 
             # Sequential, not parallel: a single Ollama GPU can only serve one
             # model at a time. Running passes concurrently just queues requests
@@ -211,8 +226,10 @@ class JobOrchestrator:
                 entry = next((e for e in registry if e.get("id") == model_id), None)
                 label = entry.get("label", model_id) if entry else model_id
 
-                pass_pct_start = 35 + idx * pct_per_model
-                pass_pct_end = 35 + (idx + 1) * pct_per_model
+                pass_pct_start = int(PASS_BAND_START + idx * pct_per_model)
+                pass_pct_end = min(
+                    PASS_BAND_END, int(PASS_BAND_START + (idx + 1) * pct_per_model)
+                )
 
                 self.active_jobs[job_id]["status"] = f"[{idx+1}/{n_models}] Preflighting {label}..."
                 self.active_jobs[job_id]["progress"] = pass_pct_start
@@ -276,7 +293,13 @@ class JobOrchestrator:
 
                 try:
                     extracted = await extractor.batch_extract(
-                        cleaned_payloads, repo=repo, progress_callback=_progress
+                        cleaned_payloads,
+                        repo=repo,
+                        progress_callback=_progress,
+                        # Without this, cancellation was only observed between
+                        # model passes: a single-model job ignored cancel until
+                        # both LLM passes had finished.
+                        check_cancel=check_cancel,
                     )
                     per_model_results[model_id] = {
                         "label": label,

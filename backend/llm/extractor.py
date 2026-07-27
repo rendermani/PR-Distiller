@@ -2,6 +2,7 @@ import json
 import asyncio
 from litellm import completion, acompletion
 from db.lightrag_manager import LightRAGManager
+from pipeline.model_registry import api_key_for_call
 from pipeline.semantic_fuser import SemanticFuser
 
 
@@ -53,7 +54,11 @@ class LargeLLMExtractor:
         # that is intentional; the orchestrator must always pass explicit values.
         self.model = model
         self.api_base = api_base
-        self.api_key = api_key or "unused"
+        # Only Ollama needs the no-auth sentinel. Applying `or "unused"` to every
+        # provider turned "no API key configured" into an upstream 401 that gave
+        # the operator nothing to act on; resolve_model already supplies the
+        # sentinel for ollama/ models, so an empty key here is a real gap.
+        self.api_key = api_key_for_call(model, api_key)
         self.model_id = model_id
         self.model_label = model_label
         self.db = db_manager
@@ -116,9 +121,18 @@ class LargeLLMExtractor:
             raw_content = raw_content.replace("```json", "").replace("```", "").strip()
         elif raw_content.startswith("```"):
             raw_content = raw_content.replace("```", "").strip()
-        # Extract just the first JSON object — models sometimes append extra text.
+        # Extract just the first JSON value — models sometimes append extra text.
         decoder = json.JSONDecoder()
         obj, _ = decoder.raw_decode(raw_content.strip())
+        # raw_decode happily returns a list or scalar. Callers index the result
+        # like a dict, so a list response used to surface as
+        # "'list' object has no attribute 'get'" and be counted as "no rule
+        # found" rather than "the model emitted the wrong shape".
+        if not isinstance(obj, dict):
+            raise ValueError(
+                f"LLM returned {type(obj).__name__}, expected a JSON object. "
+                f"Response began: {raw_content[:120]!r}"
+            )
         return obj
 
     def _apply_metadata(self, rule_dict: dict, repo: str) -> dict:
@@ -260,8 +274,13 @@ class LargeLLMExtractor:
             if '</think>' in raw:
                 raw = raw.split('</think>')[-1].strip()
             return 'EXTRACT' in raw.upper()
-        except Exception:
-            return True  # err on side of caution
+        except Exception as exc:
+            # Err on the side of extracting: a classify failure must not silently
+            # discard a comment that may carry a rule. But say so — an LLM outage
+            # promotes every comment to the expensive extract pass, and without a
+            # log that is indistinguishable from a genuinely relevant corpus.
+            print(f"[Classify Error] {type(exc).__name__}: {exc} — defaulting to EXTRACT")
+            return True
 
     # Maximum concurrent LLM requests. Ollama on Apple Silicon with Metal can
     # handle several requests in flight; more than ~4 just queues without
@@ -269,11 +288,30 @@ class LargeLLMExtractor:
     # slower but still benefits from a few slots of overlap.
     LLM_CONCURRENCY = 4
 
-    async def batch_extract(self, payloads: list, repo: str, progress_callback=None) -> list:
+    async def batch_extract(
+        self, payloads: list, repo: str, progress_callback=None, check_cancel=None
+    ) -> list:
         """Two-pass extract. progress_callback(status_str, pct_int) is called after
-        each classify and extract completion so the UI stays live."""
+        each classify and extract completion so the UI stays live.
+
+        check_cancel() is polled between completions and, when it returns True,
+        pending work is cancelled and whatever finished so far is returned. The
+        orchestrator previously only checked cancellation *between* model passes,
+        so a cancel during a long single-model run was acknowledged in the UI
+        while both LLM passes ran to completion regardless.
+        """
         total = len(payloads)
         sem = asyncio.Semaphore(self.LLM_CONCURRENCY)
+
+        def _cancelled() -> bool:
+            return bool(check_cancel and check_cancel())
+
+        async def _drain(tasks: list) -> None:
+            """Cancel pending tasks and wait for them to finish unwinding."""
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         async def _classify_one(comment: str) -> bool:
             async with sem:
@@ -293,8 +331,12 @@ class LargeLLMExtractor:
         for coro in asyncio.as_completed(classify_tasks):
             try:
                 await coro
-            except Exception:
-                pass  # tolerate individual failures; see the done/result scan below
+            except Exception as exc:
+                # Individual failures are tolerated — the done/result scan below
+                # records a per-task fallback — but log them, or a total LLM
+                # outage looks identical to every comment being classified as
+                # relevant.
+                print(f"[Two-Pass] classify task failed: {type(exc).__name__}: {exc}")
             # Map back: find the first task that is done and unrecorded
             for i, t in enumerate(classify_tasks):
                 if t.done() and classifications[i] is None:
@@ -306,6 +348,10 @@ class LargeLLMExtractor:
             if progress_callback:
                 pct = 35 + int(done_count / total * 25)  # 35→60%
                 progress_callback(f"Classifying {done_count}/{total} comments...", pct)
+            if _cancelled():
+                await _drain(classify_tasks)
+                print("[Two-Pass] Cancelled during classify; returning no rules.")
+                return []
 
         # Resolve any remaining None slots
         for i, v in enumerate(classifications):
@@ -328,8 +374,8 @@ class LargeLLMExtractor:
         for coro in asyncio.as_completed(extract_tasks):
             try:
                 await coro
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"[Two-Pass] extract task failed: {type(exc).__name__}: {exc}")
             for i, t in enumerate(extract_tasks):
                 if t.done() and results[i] is None:
                     try:
@@ -340,5 +386,10 @@ class LargeLLMExtractor:
             if progress_callback:
                 pct = 60 + int(done_count / max(len(keepers), 1) * 35)  # 60→95%
                 progress_callback(f"Extracting rules {done_count}/{len(keepers)}...", pct)
+            if _cancelled():
+                await _drain(extract_tasks)
+                kept = [r for r in results if r and r is not False]
+                print(f"[Two-Pass] Cancelled during extract; keeping {len(kept)} finished rules.")
+                return kept
 
         return [r for r in results if r and r is not False]
