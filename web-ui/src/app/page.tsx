@@ -59,17 +59,12 @@ export default function Home() {
   const [useCache, setUseCache] = useState(false);
   const [cacheInfo, setCacheInfo] = useState<any>(null);
 
-  // Global Config
-  // Placeholder shown before /api/config resolves. api_base defaults to
-  // host.docker.internal because the backend runs in a container, where
-  // localhost is the container's own loopback rather than the host's Ollama.
+  // Global Config. Shape mirrors the backend's ConfigUpdate schema: inference
+  // config lives in the llm_models registry, with llm_models_active naming the
+  // ids to run for the next job.
   const [config, setConfig] = useState<any>({
-    github_token: "", llm_provider: "ollama", llm_api_base: "http://host.docker.internal:11434/v1", llm_model: "ollama/qwen3:8b", llm_api_key: "", provider_api_keys: {} as Record<string, string>, repos: {}, provider_models: {}
+    github_token: "", llm_models: [] as any[], llm_models_active: [] as string[], provider_api_keys: {} as Record<string, string>, repos: {}, provider_models: {}
   });
-
-  // Treat "local" (old) and "ollama" as the same provider so URL-vs-API-key
-  // conditional rendering works for both existing saved configs and new ones.
-  const isLocalProvider = (p: string) => p === "ollama" || p === "local";
 
   // All backend calls go through a same-origin Next.js proxy that injects
   // the API auth token server-side. The token never reaches the client bundle.
@@ -84,8 +79,8 @@ export default function Home() {
     return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
   };
 
-  const [isCustomModel, setIsCustomModel] = useState(false);
-  const [customModelString, setCustomModelString] = useState("");
+  // Surfaces a rejected config save instead of closing the modal silently.
+  const [configError, setConfigError] = useState("");
 
   // Error-handling state
   const [tokenStatus, setTokenStatus] = useState<{state: "idle" | "checking" | "valid" | "invalid"; message?: string; login?: string; scopes?: string[]}>({state: "idle"});
@@ -130,16 +125,13 @@ export default function Home() {
         setThreshold(data.repos[firstRepo].threshold || 0.45);
       }
 
-      // Normalize legacy "local" to "ollama" so the dropdown has a matching option.
-      const rawProvider = data.llm_provider || "ollama";
-      const providerStr = rawProvider === "local" ? "ollama" : rawProvider;
-      const providerMap = data.provider_models?.[providerStr] || [];
-      const isStandard = providerMap.some((m: any) => m.id === data.llm_model);
-
-      setIsCustomModel(!isStandard);
-      if (!isStandard) setCustomModelString(data.llm_model || "");
-
-      setConfig({ ...data, repos: data.repos || {}, llm_provider: providerStr, provider_models: data.provider_models || {} });
+      setConfig({
+        ...data,
+        repos: data.repos || {},
+        llm_models: data.llm_models || [],
+        llm_models_active: data.llm_models_active || [],
+        provider_models: data.provider_models || {},
+      });
       setHfTokenSet(
         Boolean(data.huggingface_token && data.huggingface_token !== "***") ||
         Boolean(data.env_overrides?.huggingface_token)
@@ -294,15 +286,86 @@ export default function Home() {
   // ---------------------------------
   // HANDLERS
   // ---------------------------------
+  // --- llm_models registry editing ---------------------------------------
+  // The backend's ConfigUpdate schema sets extra="forbid", so only the fields
+  // it declares may be posted. The superseded llm_provider / llm_model /
+  // llm_api_key fields are dropped in handleSaveConfig rather than sent.
+
+  const updateModelEntry = (idx: number, patch: Record<string, any>) => {
+    const models = [...(config.llm_models || [])];
+    models[idx] = { ...models[idx], ...patch };
+    setConfig({ ...config, llm_models: models });
+  };
+
+  const removeModelEntry = (idx: number) => {
+    const models = [...(config.llm_models || [])];
+    const [removed] = models.splice(idx, 1);
+    setConfig({
+      ...config,
+      llm_models: models,
+      // Drop the id from the active list too, or the job would reference a
+      // model that no longer exists in the registry.
+      llm_models_active: (config.llm_models_active || []).filter((id: string) => id !== removed.id),
+    });
+  };
+
+  const addModelEntry = () => {
+    const existing = config.llm_models || [];
+    // Registry ids must match ^[a-z0-9][a-z0-9_-]*$ (see model_registry.py)
+    // and be unique, since llm_models_active refers to them by id.
+    const used = new Set(existing.map((m: any) => m.id));
+    let n = existing.length + 1;
+    while (used.has(`model-${n}`)) n += 1;
+    const entry = {
+      id: `model-${n}`,
+      label: `Model ${n}`,
+      model: "ollama/qwen3:8b",
+      api_base: "http://host.docker.internal:11434/v1",
+      api_key_override: "",
+      enabled: true,
+    };
+    setConfig({
+      ...config,
+      llm_models: [...existing, entry],
+      llm_models_active: [...(config.llm_models_active || []), entry.id],
+    });
+  };
+
+  const toggleModelActive = (id: string, active: boolean) => {
+    const current = config.llm_models_active || [];
+    setConfig({
+      ...config,
+      llm_models_active: active
+        ? [...current, id]
+        : current.filter((existing: string) => existing !== id),
+    });
+  };
+
   const handleSaveConfig = async (e: any) => {
     e.preventDefault();
-    const activeModel = isCustomModel ? customModelString : config.llm_model;
-    const { llm_api_key: _dropped, ...rest } = config;
-    const payload = { ...rest, llm_model: activeModel };
-    await apiFetch(`/api/config`, {
+    // Send only what ConfigUpdate accepts. Posting the superseded single-model
+    // fields made every save fail with HTTP 422 (extra_forbidden).
+    const payload = {
+      github_token: config.github_token,
+      huggingface_token: config.huggingface_token,
+      github_webhook_secret: config.github_webhook_secret,
+      llm_models: config.llm_models || [],
+      llm_models_active: config.llm_models_active || [],
+      provider_api_keys: config.provider_api_keys || {},
+      embedding_model: config.embedding_model,
+      repos: config.repos || {},
+    };
+    const res = await apiFetch(`/api/config`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
     });
-    setConfig(payload);
+    if (!res.ok) {
+      // Surface the rejection instead of closing the modal as though it saved.
+      const detail = await res.text().catch(() => "");
+      setConfigError(`Save failed (HTTP ${res.status}). ${detail.slice(0, 300)}`);
+      return;
+    }
+    setConfigError("");
+    setConfig({ ...config, ...payload });
     setShowSettings(false);
   };
 
@@ -409,14 +472,6 @@ export default function Home() {
     setIsExporting(false);
   };
 
-
-  const getApiKeyLabel = () => {
-    if (config.llm_provider === "google") return "Google API Key";
-    if (config.llm_provider === "anthropic") return "Anthropic API Key";
-    if (config.llm_provider === "openrouter") return "OpenRouter API Key";
-    if (config.llm_provider === "openai") return "OpenAI API Key";
-    return "Custom Provider API Key";
-  };
 
   const llmBannerVisible = llmHealth && !llmHealth.reachable && !bannerDismissed;
   const os = detectOS();
@@ -820,81 +875,85 @@ export default function Home() {
                   LLM Generation Matrix
                 </h3>
 
-                <div className="mb-5">
-                  <label className="text-xs text-neutral-500 uppercase tracking-widest mb-2 block">1. Target Provider Array</label>
-                  <select
-                    value={config.llm_provider}
-                    onChange={e => {
-                      const newProvider = e.target.value;
-                      setConfig({ ...config, llm_provider: newProvider, llm_model: "" });
-                      setIsCustomModel(false);
-                    }}
-                    className="w-full bg-black/50 border border-white/10 rounded-lg p-3 text-sm text-white outline-none cursor-pointer focus:border-purple-500"
-                  >
-                    <option value="ollama">Self-hosted (Ollama / vLLM / any OpenAI-compatible)</option>
-                    <option value="openai">OpenAI</option>
-                    <option value="google">Google Gemini</option>
-                    <option value="anthropic">Anthropic Claude</option>
-                    <option value="openrouter">OpenRouter</option>
-                  </select>
-                </div>
+                <p className="text-xs text-neutral-500 mb-4 leading-relaxed">
+                  A job runs the crawl once, then repeats the extract pass for every
+                  checked model and fuses the results. More models means more unique
+                  rules at proportionally longer run time.
+                </p>
 
-                <div className="mb-5">
-                  <label className="text-xs text-neutral-500 uppercase tracking-widest mb-2 block">2. Associated Model Boundary</label>
-                  <select
-                    value={isCustomModel ? "custom" : config.llm_model}
-                    onChange={e => {
-                      const val = e.target.value;
-                      if (val === "custom") setIsCustomModel(true);
-                      else {
-                        setIsCustomModel(false);
-                        setConfig({ ...config, llm_model: val });
-                      }
-                    }}
-                    className="w-full bg-black/50 border border-white/10 rounded-lg p-3 text-sm text-purple-300 outline-none cursor-pointer focus:border-purple-500 mb-2"
-                  >
-                    <option value="" disabled>Select internal map...</option>
-                    {(config.provider_models?.[config.llm_provider] || []).map((m: any) => (
-                      <option key={m.id} value={m.id}>{m.label}</option>
-                    ))}
-                    <option value="custom">⚙️ Custom Explicit Endpoint...</option>
-                  </select>
-
-                  {isCustomModel && (
-                    <input
-                      value={customModelString} onChange={e => setCustomModelString(e.target.value)}
-                      placeholder="e.g. huggingface/databricks"
-                      className="w-full bg-black/80 border border-purple-500/50 rounded-lg p-3 text-sm text-purple-400 outline-none mt-2 shadow-inner"
-                    />
+                <div className="space-y-3 mb-4">
+                  {(config.llm_models || []).length === 0 && (
+                    <div className="text-xs text-amber-400/80 border border-amber-500/30 rounded-lg p-3 bg-amber-500/5">
+                      No models configured. Add one below, or inference will fail.
+                    </div>
                   )}
+
+                  {(config.llm_models || []).map((entry: any, idx: number) => {
+                    const isActive = (config.llm_models_active || []).includes(entry.id);
+                    return (
+                      <div key={entry.id} className="border border-white/10 rounded-lg p-3 bg-black/40">
+                        <div className="flex items-center gap-3 mb-3">
+                          <input
+                            type="checkbox"
+                            checked={isActive}
+                            onChange={e => toggleModelActive(entry.id, e.target.checked)}
+                            className="accent-purple-500 w-4 h-4 cursor-pointer"
+                            aria-label={`Use ${entry.label || entry.id} for the next job`}
+                          />
+                          <input
+                            value={entry.label}
+                            onChange={e => updateModelEntry(idx, { label: e.target.value })}
+                            placeholder="Display name"
+                            className="flex-1 bg-transparent text-sm text-white outline-none border-b border-transparent focus:border-purple-500"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => removeModelEntry(idx)}
+                            className="text-neutral-500 hover:text-red-400 text-xs"
+                            aria-label={`Remove ${entry.label || entry.id}`}
+                          >
+                            Remove
+                          </button>
+                        </div>
+
+                        <label className="text-[10px] text-neutral-500 uppercase tracking-widest">Model string</label>
+                        <input
+                          value={entry.model}
+                          onChange={e => updateModelEntry(idx, { model: e.target.value })}
+                          placeholder="ollama/qwen3:8b"
+                          className="w-full bg-black/60 border border-white/10 rounded p-2 text-xs font-mono text-purple-300 outline-none focus:border-purple-500 mb-2"
+                        />
+
+                        <label className="text-[10px] text-neutral-500 uppercase tracking-widest">API base URL</label>
+                        <input
+                          value={entry.api_base}
+                          onChange={e => updateModelEntry(idx, { api_base: e.target.value })}
+                          placeholder="http://host.docker.internal:11434/v1"
+                          className="w-full bg-black/60 border border-white/10 rounded p-2 text-xs font-mono text-neutral-300 outline-none focus:border-purple-500 mb-2"
+                        />
+
+                        <label className="text-[10px] text-amber-500/80 uppercase tracking-widest flex items-center gap-1">
+                          <span>🔒</span> API key override (optional)
+                        </label>
+                        <input
+                          value={entry.api_key_override || ""}
+                          onChange={e => updateModelEntry(idx, { api_key_override: e.target.value })}
+                          type="password"
+                          placeholder="Leave blank to use the provider key"
+                          className="w-full bg-black/60 border border-amber-500/30 rounded p-2 text-xs font-mono text-white outline-none focus:border-amber-500"
+                        />
+                      </div>
+                    );
+                  })}
                 </div>
 
-                {/* Conditional URL Field for Local Mode */}
-                {isLocalProvider(config.llm_provider) && (
-                  <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }}>
-                    <label className="text-xs text-neutral-500 uppercase tracking-widest mb-2 block">3. API Base URL (Ollama / vLLM / OpenAI-compatible)</label>
-                    <input value={config.llm_api_base} onChange={e => setConfig({ ...config, llm_api_base: e.target.value })} placeholder="http://host.docker.internal:11434/v1" className="w-full bg-black/80 border border-white/10 rounded-lg p-3 text-sm font-mono text-neutral-300 outline-none focus:border-purple-500 shadow-inner" />
-                  </motion.div>
-                )}
-
-                {/* Conditional API Key Field for Online Providers */}
-                {!isLocalProvider(config.llm_provider) && (
-                  <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }}>
-                    <label className="text-xs text-amber-500/80 uppercase tracking-widest mb-2 block flex items-center gap-2">
-                      <span>🔒</span> {getApiKeyLabel()} (Symmetrically Encrypted)
-                    </label>
-                    <input
-                      value={config.provider_api_keys?.[config.llm_provider] || ""}
-                      onChange={e => setConfig({
-                        ...config,
-                        provider_api_keys: { ...config.provider_api_keys, [config.llm_provider]: e.target.value }
-                      })}
-                      type="password"
-                      placeholder={`Authorize Connection...`}
-                      className="w-full bg-black/80 border border-amber-500/40 rounded-lg p-3 text-sm font-mono text-white outline-none focus:border-amber-500 shadow-inner"
-                    />
-                  </motion.div>
-                )}
+                <button
+                  type="button"
+                  onClick={addModelEntry}
+                  className="w-full bg-white/5 hover:bg-white/10 border border-white/10 text-purple-300 py-2.5 rounded-lg text-xs font-semibold tracking-wide transition"
+                >
+                  + Add model
+                </button>
               </div>
 
               <div className="text-xs text-neutral-500 text-center pt-2 border-t border-white/5">
@@ -903,6 +962,12 @@ export default function Home() {
                   🔒 Encrypted Vault
                 </a>
               </div>
+
+              {configError && (
+                <div className="text-xs text-red-400 border border-red-500/40 rounded-lg p-3 bg-red-500/5" role="alert">
+                  {configError}
+                </div>
+              )}
 
               <div className="flex gap-4 mt-2">
                 <button type="button" onClick={() => setShowSettings(false)} className="flex-1 bg-white/5 hover:bg-white/10 text-white py-4 rounded-lg font-semibold transition tracking-wide text-sm border border-white/5">Cancel Edit</button>
