@@ -83,6 +83,72 @@ class TestRegistrySeededFromEnv(unittest.TestCase):
         self.assertEqual(cfg["llm_models_active"], [])
 
 
+class TestExistingConfigIsMigratedOnce(unittest.TestCase):
+    """A config written before the registry existed must be back-filled.
+
+    Seeding only ran when config.json was absent, so every install that already
+    had a config file — i.e. every existing install — loaded with an empty
+    registry and no runnable model. The marker distinguishes "never seeded" from
+    "the operator removed every model", so migration happens exactly once.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _write_pre_registry_config(self):
+        """A config.json shaped like one written before seeding existed."""
+        import json
+
+        path = os.path.join(self.tmp.name, "config.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({
+                "github_token_enc": "",
+                "llm_models": [],
+                "llm_models_active": [],
+                "provider_api_keys_enc": {},
+                "embedding_model": "BAAI/bge-base-en-v1.5",
+                "repos": {},
+            }, f)
+
+    def test_pre_existing_empty_registry_is_seeded_from_env(self):
+        self._write_pre_registry_config()
+
+        with patch.object(settings, "LLM_MODEL", "ollama/qwen3:8b"), \
+             patch.object(settings, "LLM_API_BASE", "http://host.docker.internal:11434/v1"):
+            cfg = _fresh_manager(self.tmp.name).load_config()
+
+        self.assertEqual(len(cfg["llm_models"]), 1)
+        self.assertEqual(cfg["llm_models"][0]["model"], "ollama/qwen3:8b")
+        self.assertEqual(cfg["llm_models_active"], [cfg["llm_models"][0]["id"]])
+
+    def test_migration_does_not_repeat_after_operator_empties_registry(self):
+        """Once migrated, removing every model must stick."""
+        self._write_pre_registry_config()
+
+        with patch.object(settings, "LLM_MODEL", "ollama/qwen3:8b"), \
+             patch.object(settings, "LLM_API_BASE", "http://localhost:11434/v1"):
+            mgr = _fresh_manager(self.tmp.name)
+            self.assertEqual(len(mgr.load_config()["llm_models"]), 1)
+
+            cfg = mgr.load_config()
+            cfg["llm_models"] = []
+            cfg["llm_models_active"] = []
+            mgr.save_config(cfg)
+
+            reloaded = _fresh_manager(self.tmp.name).load_config()
+
+        self.assertEqual(reloaded["llm_models"], [])
+
+    def test_no_migration_when_env_model_is_blank(self):
+        self._write_pre_registry_config()
+
+        with patch.object(settings, "LLM_MODEL", ""):
+            cfg = _fresh_manager(self.tmp.name).load_config()
+
+        self.assertEqual(cfg["llm_models"], [])
+
+
 class TestSeedingDoesNotClobberExistingConfig(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

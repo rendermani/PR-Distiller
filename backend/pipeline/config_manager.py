@@ -24,6 +24,7 @@ class ConfigManager:
         self.key_path = os.path.join(settings.DATA_DIR, ".secret_key")
         self.cipher = self._build_cipher(self._resolve_key())
         self._ensure_default_config()
+        self._migrate_existing_config()
 
     @staticmethod
     def _build_cipher(key: bytes) -> Fernet:
@@ -67,8 +68,18 @@ class ConfigManager:
         if not token: return ""
         try:
             return self.cipher.decrypt(token.encode()).decode()
-        except Exception:
-            return ""  # Gracefully fail if encryption key was rotated or corrupted
+        except Exception as exc:
+            # Returning "" keeps the app bootable after a FERNET_KEY rotation
+            # rather than making every request fail, but it must not be silent:
+            # undecryptable secrets previously rendered as "not configured",
+            # which reads as "never set" instead of "set but unreadable".
+            logger.error(
+                "Failed to decrypt a stored secret (%s: %s). Treating it as unset. "
+                "This usually means FERNET_KEY changed or data/config.json was "
+                "written with a different key — re-enter the affected secrets.",
+                type(exc).__name__, exc,
+            )
+            return ""
 
     @classmethod
     def _strip_redaction_sentinels(cls, payload: dict) -> dict:
@@ -151,6 +162,46 @@ class ConfigManager:
             "enabled": True,
         }]
 
+    # Written once the registry has been seeded (or deliberately left empty), so
+    # the migration below can tell "this config predates the registry" from
+    # "the operator removed every model" and never re-adds one behind their back.
+    SEED_MARKER = "llm_models_seeded"
+
+    def _migrate_existing_config(self) -> None:
+        """Back-fill the llm_models registry on a config written before it existed.
+
+        Seeding originally happened only when config.json was absent, so every
+        install that already had one — i.e. every existing install — loaded with
+        an empty registry: jobs had no model to run and /api/health/llm reported
+        "No active LLM models configured" without ever probing the server.
+        """
+        try:
+            with open(self.config_path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            # Absent or unreadable: _ensure_default_config and load_config's own
+            # error handling own those cases.
+            return
+
+        if raw.get(self.SEED_MARKER) or raw.get("llm_models"):
+            return
+
+        seeded = self._seed_models_from_env()
+        if not seeded:
+            return
+
+        raw["llm_models"] = [
+            {**entry, "api_key_override_enc": self._encrypt(entry.pop("api_key_override", ""))}
+            for entry in (dict(e) for e in seeded)
+        ]
+        raw["llm_models_active"] = [e["id"] for e in seeded]
+        raw[self.SEED_MARKER] = True
+        self._atomic_write_json(raw)
+        logger.info(
+            "Seeded llm_models registry from LLM_* environment variables: %s",
+            [e["id"] for e in seeded],
+        )
+
     def _ensure_default_config(self):
         if not os.path.exists(self.config_path):
             os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
@@ -159,6 +210,7 @@ class ConfigManager:
                 "github_token": "",
                 "github_webhook_secret": "",
                 "huggingface_token": "",
+                self.SEED_MARKER: True,
                 "llm_models": seeded_models,
                 "llm_models_active": [e["id"] for e in seeded_models],
                 "provider_api_keys": {},
@@ -179,6 +231,17 @@ class ConfigManager:
 
             provider_keys_enc = raw.get("provider_api_keys_enc", {})
             provider_keys = {p: self._decrypt(v) for p, v in provider_keys_enc.items()}
+
+            # Merge in keys supplied via the documented env vars. env_overrides()
+            # already reports these to the UI, which then locks the input as
+            # "set via <ENV_VAR>" — but they never reached provider_api_keys, so
+            # inference resolved an empty key for a provider the UI showed as
+            # configured, with no way for the operator to correct it.
+            # A stored value wins: an operator who typed a key in the UI has
+            # made a more specific choice than the ambient environment.
+            for provider, env_key in self._env_provider_keys().items():
+                if env_key and not provider_keys.get(provider):
+                    provider_keys[provider] = env_key
 
             # Decrypt per-entry api_key_override fields.
             llm_models_raw = raw.get("llm_models", [])
@@ -281,6 +344,10 @@ class ConfigManager:
                 "github_token_enc": self._encrypt(current.get("github_token", "")),
                 "huggingface_token_enc": self._encrypt(current.get("huggingface_token", "")),
                 "github_webhook_secret_enc": self._encrypt(current.get("github_webhook_secret", "")),
+                # Any save means the registry's current state is intentional —
+                # including an operator emptying it. Persist the marker so the
+                # migration never re-seeds behind their back.
+                self.SEED_MARKER: True,
                 "llm_models": llm_models_enc,
                 "llm_models_active": current.get("llm_models_active", []),
                 "provider_api_keys_enc": provider_keys_enc,
@@ -294,18 +361,35 @@ class ConfigManager:
 
             return current
 
+    @staticmethod
+    def _env_provider_keys() -> dict[str, str]:
+        """Provider API keys supplied via environment variables.
+
+        Keyed by the provider name this project stores keys under, which is what
+        the Vault page renders and what provider_api_keys uses. Note `google`
+        rather than LiteLLM's `gemini/` model prefix; model_registry maps
+        between the two.
+        """
+        return {
+            "openai": settings.OPENAI_API_KEY,
+            "anthropic": settings.ANTHROPIC_API_KEY,
+            "google": settings.GOOGLE_API_KEY,
+            "openrouter": settings.OPENROUTER_API_KEY,
+        }
+
     def env_overrides(self) -> dict[str, bool]:
         """Return which secret fields are sourced from environment variables.
 
-        UI uses this to disable inputs that would otherwise be ineffective
-        (env wins over the encrypted-config value).
+        The UI uses this to label an input as env-supplied. For provider API
+        keys the env value is a *fallback*: load_config prefers a key stored in
+        the encrypted config, so an operator can still override the ambient
+        environment from the UI.
         """
-        return {
+        overrides = {
             "github_token": bool(settings.GITHUB_TOKEN),
             "huggingface_token": bool(settings.HUGGINGFACE_HUB_TOKEN),
             "github_webhook_secret": bool(settings.GITHUB_WEBHOOK_SECRET),
-            "provider_api_keys.openai": bool(settings.OPENAI_API_KEY),
-            "provider_api_keys.anthropic": bool(settings.ANTHROPIC_API_KEY),
-            "provider_api_keys.google": bool(settings.GOOGLE_API_KEY),
-            "provider_api_keys.openrouter": bool(settings.OPENROUTER_API_KEY),
         }
+        for provider, env_key in self._env_provider_keys().items():
+            overrides[f"provider_api_keys.{provider}"] = bool(env_key)
+        return overrides
