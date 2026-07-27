@@ -200,7 +200,6 @@ class TestConfigManagerEmbeddingModel(unittest.TestCase):
         from pipeline.config_manager import ConfigManager
 
         manager = ConfigManager.__new__(ConfigManager)
-        manager.base_dir = tmp_dir
         manager.config_path = os.path.join(tmp_dir, "config.json")
         manager.key_path = os.path.join(tmp_dir, ".secret_key")
         from cryptography.fernet import Fernet
@@ -239,7 +238,7 @@ class TestConfigManagerEmbeddingModel(unittest.TestCase):
         """Saving only llm_model must not wipe the stored embedding_model."""
         manager = self._make_config_manager(self.tmp_dir)
         manager.save_config({"embedding_model": "BAAI/bge-large-en-v1.5"})
-        manager.save_config({"llm_model": "openai/gpt-4o"})
+        manager.save_config({"llm_models_active": ["something-new"]})
         config = manager.load_config()
         self.assertEqual(config["embedding_model"], "BAAI/bge-large-en-v1.5")
 

@@ -13,7 +13,6 @@ def _make_manager(tmp_dir):
     from pipeline.config_manager import ConfigManager
     from cryptography.fernet import Fernet
     m = ConfigManager.__new__(ConfigManager)
-    m.base_dir = tmp_dir
     m.config_path = os.path.join(tmp_dir, "config.json")
     m.key_path = os.path.join(tmp_dir, ".secret_key")
     m.cipher = Fernet(m._resolve_key())

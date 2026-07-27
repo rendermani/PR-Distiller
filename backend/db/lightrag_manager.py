@@ -8,6 +8,12 @@ import chromadb
 from chromadb.config import Settings
 from chromadb.utils import embedding_functions
 
+import settings as app_settings
+
+# Sourced from settings so containerized and native runs share one store; a
+# __file__-derived path made the location depend on where the code sits.
+VECTOR_DB_PATH = app_settings.VECTOR_DB_DIR
+
 _SLUG_CHARS = re.compile(r"[^a-z0-9_-]+")
 
 
@@ -95,11 +101,8 @@ class LightRAGManager:
     so they can be contextually injected into the student models during routing.
     """
     def __init__(self):
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        db_path = os.path.join(base_dir, "data", "code_rag_vectors")
-
         self.embed_fn = _resolve_embedding_function()
-        self.client = chromadb.PersistentClient(path=db_path)
+        self.client = chromadb.PersistentClient(path=VECTOR_DB_PATH)
         self.collection = self.client.get_or_create_collection(
             name="enterprise_rejections",
             embedding_function=self.embed_fn,
@@ -183,6 +186,25 @@ class LightRAGManager:
             chroma_metadata["confidence"] = metadata["confidence"]
         if "category" in metadata:
             chroma_metadata["category"] = metadata["category"]
+
+        # Provenance and versioning fields (Task 4 multi-model pipeline).
+        # merged_with_models and merged_from are comma-joined strings to satisfy
+        # ChromaDB's str/int/float/bool metadata constraint.
+        if "extracted_by_model" in metadata:
+            chroma_metadata["extracted_by_model"] = metadata["extracted_by_model"]
+        if "extracted_by_label" in metadata:
+            chroma_metadata["extracted_by_label"] = metadata["extracted_by_label"]
+        if "merged_with_models" in metadata:
+            val = metadata["merged_with_models"]
+            # Normalise: the fuser stores a comma-joined string; the extractor
+            # seeds it as an empty list via setdefault — flatten to string here.
+            if isinstance(val, list):
+                val = ",".join(str(v) for v in val)
+            chroma_metadata["merged_with_models"] = val
+        if "merge_count" in metadata:
+            chroma_metadata["merge_count"] = metadata["merge_count"]
+        if "merged_from" in metadata:
+            chroma_metadata["merged_from"] = metadata["merged_from"]
 
         self.collection.add(
             documents=[document_text],

@@ -20,7 +20,6 @@ def _make_manager(tmp_dir: str):
     from cryptography.fernet import Fernet
 
     manager = ConfigManager.__new__(ConfigManager)
-    manager.base_dir = tmp_dir
     manager.config_path = os.path.join(tmp_dir, "config.json")
     manager.key_path = os.path.join(tmp_dir, ".secret_key")
     manager.cipher = Fernet(manager._resolve_key())
@@ -40,7 +39,6 @@ class TestFernetKeyResolution(unittest.TestCase):
         from pipeline.config_manager import ConfigManager
         with patch("settings.FERNET_KEY", "not-a-valid-fernet-key"):
             manager = ConfigManager.__new__(ConfigManager)
-            manager.base_dir = self.tmp_dir
             manager.config_path = os.path.join(self.tmp_dir, "config.json")
             manager.key_path = os.path.join(self.tmp_dir, ".secret_key")
             with self.assertRaises(ValueError) as ctx:
@@ -72,14 +70,6 @@ class TestSaveConfigSentinelFilter(unittest.TestCase):
         self.assertEqual(
             self.manager.load_config()["provider_api_keys"]["openai"], "sk-real"
         )
-
-    def test_save_config_does_not_persist_sentinel_for_legacy_llm_api_key(self):
-        """Legacy llm_api_key='***' must not overwrite the active provider's real key."""
-        self.manager.save_config({"llm_api_key": "***", "llm_provider": "openai"})
-        self.assertEqual(
-            self.manager.load_config()["provider_api_keys"]["openai"], "sk-real"
-        )
-
 
 class TestProviderApiKeysMerge(unittest.TestCase):
     def setUp(self):

@@ -23,7 +23,6 @@ def _make_manager(tmp_dir: str):
     from cryptography.fernet import Fernet
 
     manager = ConfigManager.__new__(ConfigManager)
-    manager.base_dir = tmp_dir
     manager.config_path = os.path.join(tmp_dir, "config.json")
     manager.key_path = os.path.join(tmp_dir, ".secret_key")
     manager.cipher = Fernet(manager._resolve_key())

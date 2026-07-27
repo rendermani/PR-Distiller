@@ -39,7 +39,10 @@ API_AUTH_TOKEN = os.environ.get("API_AUTH_TOKEN", "")  # optional Bearer token f
 
 # --- Data Paths ---
 DATA_DIR = os.environ.get("DATA_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
-CHROMA_DIR = os.path.join(DATA_DIR, "chroma_db")
+# The ChromaDB collection directory actually used by db/lightrag_manager.py.
+# Previously named CHROMA_DIR and pointed at an unused "chroma_db" path, which
+# misreported where vectors live.
+VECTOR_DB_DIR = os.path.join(DATA_DIR, "code_rag_vectors")
 DEV_CACHE_DIR = os.path.join(DATA_DIR, "dev_cache")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 

@@ -125,14 +125,14 @@ class TestSettingsEnvOverrides(unittest.TestCase):
 
 
 class TestSettingsDerivedPaths(unittest.TestCase):
-    """Verify CHROMA_DIR, DEV_CACHE_DIR, and CONFIG_PATH derive from DATA_DIR."""
+    """Verify VECTOR_DB_DIR, DEV_CACHE_DIR, and CONFIG_PATH derive from DATA_DIR."""
 
     def tearDown(self):
         importlib.reload(_settings_module)
 
-    def test_chroma_dir_is_under_data_dir(self):
+    def test_vector_db_dir_is_under_data_dir(self):
         s = _reload_with_env({"DATA_DIR": "/custom/data"})
-        self.assertEqual(s.CHROMA_DIR, "/custom/data/chroma_db")
+        self.assertEqual(s.VECTOR_DB_DIR, "/custom/data/code_rag_vectors")
 
     def test_dev_cache_dir_is_under_data_dir(self):
         s = _reload_with_env({"DATA_DIR": "/custom/data"})
