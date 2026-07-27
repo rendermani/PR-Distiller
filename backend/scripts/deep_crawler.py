@@ -12,18 +12,12 @@ from pipeline.github_client import GitHubClient
 # Module-level constants — single source of truth for filtering
 # ---------------------------------------------------------------------------
 
-# Keywords that indicate a comment contains an actionable coding lesson.
-# Used across all three crawl functions.
-FILTER_KEYWORDS = [
-    "don't use", "do not use", "instead of", "deprecated", "hack", "anti-pattern",
-    "please use", "not the best way", "change this to", "should not", "shouldn't",
-    "avoid", "wrong approach", "bad practice", "not recommended", "security risk",
-    "race condition", "memory leak", "n+1", "sql injection", "xss",
-    "breaks when", "will fail", "bug", "regression", "missing check",
-    "error handling", "edge case", "null check", "type safety",
-]
+# Keyword pre-filtering was removed deliberately: it silently dropped large
+# amounts of real review signal (e.g. "do we need this here?", "422 missing",
+# "swagger annotation missing"). The LLM two-pass classifier is now the only
+# signal/noise filter — every structurally valid comment reaches it.
 
-# Comments that match FILTER_KEYWORDS but are docs/translation noise.
+# Docs/translation noise, excluded before the LLM sees a comment.
 NOISE_INDICATORS = [
     "translation", "翻译", "翻譯", "tradução", "traducción", "번역",
     "typo", "spelling", "grammar", "wording", "phrasing",
@@ -33,7 +27,9 @@ NOISE_INDICATORS = [
 # Bot accounts whose comments are never useful training signal.
 BOT_NAMES = frozenset([
     "dependabot[bot]", "github-actions[bot]", "vercel[bot]",
-    "copilot", "renovate[bot]", "codecov[bot]",
+    "renovate[bot]", "codecov[bot]",
+    # copilot intentionally excluded — GitHub Copilot reviews contain real
+    # actionable coding rules that are valuable extraction signal.
 ])
 
 # ---------------------------------------------------------------------------
@@ -125,7 +121,6 @@ def crawl_human_rejections(target_repos: list, months_back: int = 2, status_call
                     continue
 
                 body = c.get("body", "")
-                body_lower = body.lower()
                 diff_hunk = c.get("diff_hunk", "")
 
                 # Must have actual code context and meaningful length
@@ -133,7 +128,7 @@ def crawl_human_rejections(target_repos: list, months_back: int = 2, status_call
                     continue
 
                 # Skip translation/docs noise
-                if any(noise in body_lower for noise in NOISE_INDICATORS):
+                if any(noise in body.lower() for noise in NOISE_INDICATORS):
                     continue
 
                 # Skip comments on .md / .po / .rst files (doc translations)
@@ -141,14 +136,13 @@ def crawl_human_rejections(target_repos: list, months_back: int = 2, status_call
                 if path.endswith((".md", ".po", ".pot", ".rst", ".txt")):
                     continue
 
-                if any(kw in body_lower for kw in FILTER_KEYWORDS):
-                    repo_data.append({
-                        "id": str(comment_id),
-                        "pr_url": c.get("pull_request_url"),
-                        "diff_hunk": diff_hunk,
-                        "reviewer_comment": body
-                    })
-                    print(f"    -> Harvested Human Insight from {user_login} [Page {page}]")
+                repo_data.append({
+                    "id": str(comment_id),
+                    "pr_url": c.get("pull_request_url"),
+                    "diff_hunk": diff_hunk,
+                    "reviewer_comment": body
+                })
+                print(f"    -> Harvested Human Insight from {user_login} [Page {page}]")
 
             time.sleep(3.5)
             page += 1
@@ -250,16 +244,14 @@ def crawl_pr_reviews(target_repos: list, months_back: int = 2, status_callback=N
                     if state not in ("CHANGES_REQUESTED", "COMMENTED"):
                         continue
 
-                    body_lower = body.lower()
-                    if any(kw in body_lower for kw in FILTER_KEYWORDS):
-                        # Use PR diff as context (first 2000 chars)
-                        diff_context = pr.get("body", "") or ""
-                        review_data.append({
-                            "id": str(review.get("id", 0)),
-                            "reviewer_comment": body,
-                            "diff_hunk": diff_context[:2000]
-                        })
-                        print(f"    -> PR Review from {user_login} on PR#{pr_number}")
+                    # Use PR diff as context (first 2000 chars)
+                    diff_context = pr.get("body", "") or ""
+                    review_data.append({
+                        "id": str(review.get("id", 0)),
+                        "reviewer_comment": body,
+                        "diff_hunk": diff_context[:2000]
+                    })
+                    print(f"    -> PR Review from {user_login} on PR#{pr_number}")
 
                 time.sleep(1)  # Throttle per-PR review fetch
 
@@ -273,37 +265,13 @@ def crawl_pr_reviews(target_repos: list, months_back: int = 2, status_callback=N
     return dataset, updated_cursors
 
 
-QUALIFYING_ISSUE_LABELS = frozenset([
-    "bug", "wontfix", "invalid", "won't fix", "not a bug", "duplicate",
-])
-
-# Alias so that issue-crawl helpers use the same single source of truth.
-ISSUE_KEYWORDS = FILTER_KEYWORDS
-
 ISSUE_CONTEXT_MAX_CHARS = 2000
 ISSUE_COMMENT_MIN_LENGTH = 40
-
-
-def _issue_qualifies_by_label(issue: dict) -> bool:
-    """True if any of the issue's labels are in QUALIFYING_ISSUE_LABELS."""
-    issue_labels = {lbl.get("name", "").lower() for lbl in (issue.get("labels") or [])}
-    return bool(issue_labels & QUALIFYING_ISSUE_LABELS)
-
-
-def _issue_qualifies_by_keyword(issue: dict) -> bool:
-    """True if the issue body contains at least one architectural lesson keyword."""
-    body = (issue.get("body") or "").lower()
-    return any(kw in body for kw in ISSUE_KEYWORDS)
 
 
 def _is_bot_comment(comment: dict) -> bool:
     login = (comment.get("user") or {}).get("login", "").lower()
     return login in BOT_NAMES or "[bot]" in login
-
-
-def _comment_contains_lesson(body: str) -> bool:
-    body_lower = body.lower()
-    return any(kw in body_lower for kw in ISSUE_KEYWORDS)
 
 
 def _handle_rate_limit(response, status_callback, is_cancelled):
@@ -344,7 +312,8 @@ def _fetch_issue_comments(owner: str, repo: str, issue_number: int, headers: dic
 def _extract_lessons_from_issue(issue: dict, issue_comments: list) -> list:
     """
     Returns (comment_body, issue_body_context) tuples for all comments
-    that pass bot-filtering, minimum-length, and keyword checks.
+    that pass bot-filtering and minimum-length checks. Signal/noise
+    separation is the LLM classifier's job, not this function's.
     The issue body (truncated to ISSUE_CONTEXT_MAX_CHARS) serves as context,
     mirroring the role diff_hunk plays in PR-comment crawlers.
     """
@@ -359,10 +328,9 @@ def _extract_lessons_from_issue(issue: dict, issue_comments: list) -> list:
         if len(body) < ISSUE_COMMENT_MIN_LENGTH:
             continue
 
-        if _comment_contains_lesson(body):
-            user_login = (comment.get("user") or {}).get("login", "unknown")
-            print(f"    -> Harvested Issue Lesson from {user_login} on issue #{issue.get('number')}")
-            lessons.append((body, context))
+        user_login = (comment.get("user") or {}).get("login", "unknown")
+        print(f"    -> Harvested Issue Lesson from {user_login} on issue #{issue.get('number')}")
+        lessons.append((body, context))
 
     return lessons
 
@@ -377,9 +345,9 @@ def crawl_closed_issues(
     """
     Crawls closed GitHub issues for architectural lessons.
 
-    Issues qualify if they carry a label in QUALIFYING_ISSUE_LABELS OR if
-    their body contains a keyword from ISSUE_KEYWORDS.  Each qualifying
-    issue's comments are then individually filtered by keyword and length.
+    Every closed issue is crawled; its comments are filtered only by
+    bot-authorship and minimum length. Deciding which comments carry an
+    extractable rule is the LLM classifier's job.
 
     Uses cursor key ``{repo_string}_issues`` (= highest issue number seen)
     for incremental re-runs — same contract as the PR crawlers.
@@ -452,13 +420,6 @@ def crawl_closed_issues(
 
                 if issue_number > high_water_mark:
                     high_water_mark = issue_number
-
-                qualifies = (
-                    _issue_qualifies_by_label(issue)
-                    or _issue_qualifies_by_keyword(issue)
-                )
-                if not qualifies:
-                    continue
 
                 issue_comments = _fetch_issue_comments(owner, repo, issue_number, headers)
                 lessons = _extract_lessons_from_issue(issue, issue_comments)

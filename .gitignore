@@ -1,6 +1,7 @@
 # Dependencies
 node_modules/
 **/venv/
+**/.venv/
 __pycache__/
 *.pyc
 *.pyo
@@ -19,6 +20,9 @@ backend/data/dev_cache/
 backend/data/*.json
 !backend/data/.gitkeep
 data/
+
+# Model benchmark output (generated; see scripts/bench_models.sh)
+results/
 
 # Build artifacts
 dist/

@@ -147,22 +147,27 @@ class TestCrawlClosedIssuesLabelFiltering(unittest.TestCase):
 
     @patch("scripts.deep_crawler.time.sleep")
     @patch("scripts.deep_crawler.requests.get")
-    def test_issue_with_unrelated_label_is_excluded(self, mock_get, _sleep):
-        # Body must not contain any keyword — otherwise the issue qualifies by keyword path.
+    def test_issue_with_unrelated_label_is_still_crawled(self, mock_get, _sleep):
+        """Label pre-filtering was removed: every closed issue is crawled.
+
+        Previously a 'documentation'-labelled issue with a keyword-free body was
+        skipped without fetching its comments. The LLM classifier now decides
+        what is extractable, so the comments must be fetched and returned.
+        """
         neutral_body = "Updated the README with new usage examples."
         issue = _make_issue(12, body=neutral_body, labels=["documentation"])
-        # Comments endpoint should never be called for this issue.
-        # Call order: issues p1 (issue skipped) → issues p2 (empty, terminates)
+        comment = _make_comment("Prefer explicit imports here so the linter can resolve them.")
+        # Call order: issues p1 → that issue's comments → issues p2 (empty, terminates)
         mock_get.side_effect = [
             _ok_response([issue]),
+            _ok_response([comment]),
             _empty_response(),
         ]
 
         dataset, _ = crawl_closed_issues(["owner/repo"])
 
-        self.assertEqual(dataset, [])
-        for c in mock_get.call_args_list:
-            self.assertNotIn("/comments", str(c))
+        self.assertEqual(len(dataset), 1)
+        self.assertTrue(any("/comments" in str(c) for c in mock_get.call_args_list))
 
     @patch("scripts.deep_crawler.time.sleep")
     @patch("scripts.deep_crawler.requests.get")
@@ -184,12 +189,18 @@ class TestCrawlClosedIssuesLabelFiltering(unittest.TestCase):
         self.assertTrue(len(dataset) >= 1)
 
 
-class TestCrawlClosedIssuesKeywordFiltering(unittest.TestCase):
-    """Individual issue comments are filtered by keyword list."""
+class TestCrawlClosedIssuesCommentFiltering(unittest.TestCase):
+    """Issue comments are filtered only by bot-authorship and minimum length."""
 
     @patch("scripts.deep_crawler.time.sleep")
     @patch("scripts.deep_crawler.requests.get")
-    def test_comment_without_keyword_is_excluded(self, mock_get, _sleep):
+    def test_comment_without_keyword_is_still_included(self, mock_get, _sleep):
+        """Keyword pre-filtering was removed: keyword-free comments are kept.
+
+        The crawler no longer judges whether a comment carries a coding lesson —
+        that is the LLM classifier's job. A long, keyword-free comment must
+        therefore reach the dataset.
+        """
         issue = _make_issue(20, labels=["bug"])
         comment = _make_comment("This is a great feature, thanks for the contribution!")
 
@@ -201,7 +212,7 @@ class TestCrawlClosedIssuesKeywordFiltering(unittest.TestCase):
 
         dataset, _ = crawl_closed_issues(["owner/repo"])
 
-        self.assertEqual(dataset, [])
+        self.assertEqual(len(dataset), 1)
 
     @patch("scripts.deep_crawler.time.sleep")
     @patch("scripts.deep_crawler.requests.get")
