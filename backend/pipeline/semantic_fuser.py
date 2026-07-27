@@ -2,6 +2,7 @@ import json
 import uuid
 from litellm import completion
 from db.lightrag_manager import LightRAGManager
+from pipeline.model_registry import api_key_for_call
 
 
 def _qwen_extra_body(model: str) -> dict:
@@ -52,7 +53,9 @@ class SemanticFuser:
         if self.model and self.model.startswith("ollama/") and resolved_base and resolved_base.endswith("/v1"):
             resolved_base = resolved_base[:-3]
         self.api_base = resolved_base
-        self.api_key = api_key or "unused"
+        # See api_key_for_call: the no-auth sentinel is Ollama-only, so a
+        # missing key for a hosted provider stays empty and fails by name.
+        self.api_key = api_key_for_call(model, api_key)
 
     def process_and_fuse(self, new_rule_json: dict):
         """
@@ -187,10 +190,38 @@ class SemanticFuser:
             fused_rule["metadata"]["merged_with_models"] = ",".join(lineage)
             # Keep the first extractor as the canonical extracted_by; falls back
             # to new_origin if the existing rule pre-dates Task 4.
+            existing_label = matched_metadatas.get("extracted_by_label") if matched_metadatas else None
+            new_label = new_rule_json.get("metadata", {}).get("extracted_by_label")
             if existing_origin:
                 fused_rule["metadata"]["extracted_by_model"] = existing_origin
+                # Label must track the model it names, or the UI attributes the
+                # rule to one model while displaying another's name.
+                canonical_label = existing_label or new_label
             elif new_origin:
                 fused_rule["metadata"]["extracted_by_model"] = new_origin
+                canonical_label = new_label or existing_label
+            else:
+                canonical_label = existing_label or new_label
+            if canonical_label:
+                fused_rule["metadata"]["extracted_by_label"] = canonical_label
+
+            # Path scoping: union both rules' patterns. The metadata dict is
+            # rebuilt from scratch above, so without this the merged rule was
+            # stored with path_patterns="" — which _rule_matches_file_path reads
+            # as "unscoped, matches every file". A rule scoped to **/auth/*.py
+            # silently became global on its first merge.
+            existing_patterns_raw = matched_metadatas.get("path_patterns", "") if matched_metadatas else ""
+            existing_patterns = [p for p in existing_patterns_raw.split(",") if p]
+            new_patterns = new_rule_json.get("scoping", {}).get("path_patterns") or []
+            merged_patterns = list(existing_patterns)
+            for pattern in new_patterns:
+                if pattern and pattern not in merged_patterns:
+                    merged_patterns.append(pattern)
+            # Only emit scoping when there is something to scope by: an empty
+            # list would be indistinguishable from "global" anyway, and writing
+            # one lets a genuinely global rule stay global.
+            if merged_patterns:
+                fused_rule["scoping"] = {"path_patterns": merged_patterns}
 
             # 3. Store first so we have the canonical chroma id, then archive
             # the old rule pointing at it, then delete the old rule. archive
