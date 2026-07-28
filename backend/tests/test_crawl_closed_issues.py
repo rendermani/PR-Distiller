@@ -507,10 +507,18 @@ class TestCrawlClosedIssuesApiUrlConstruction(unittest.TestCase):
 
     @patch("scripts.deep_crawler.time.sleep")
     @patch("scripts.deep_crawler.requests.get")
-    def test_repo_without_slash_is_skipped_gracefully(self, mock_get, _sleep):
-        dataset, cursors = crawl_closed_issues(["invalid-repo-no-slash"])
+    def test_repo_without_slash_raises_instead_of_being_skipped(self, mock_get, _sleep):
+        """Superseded "skipped gracefully": silence was the bug.
 
-        self.assertEqual(dataset, [])
+        A repo registered without its owner produced a job that finished in
+        seconds having crawled nothing and sent the LLM nothing, with no error
+        anywhere — indistinguishable from a repo with no review comments.
+        """
+        from scripts.deep_crawler import InvalidRepoPathError
+
+        with self.assertRaises(InvalidRepoPathError):
+            crawl_closed_issues(["invalid-repo-no-slash"])
+
         mock_get.assert_not_called()
 
 

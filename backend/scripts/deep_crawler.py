@@ -51,10 +51,7 @@ def crawl_human_rejections(target_repos: list, months_back: int = 2, status_call
     time_ago = (datetime.utcnow() - timedelta(days=months_back*30)).isoformat() + "Z"
 
     for repo_string in target_repos:
-        if "/" in repo_string:
-            owner, repo = repo_string.split("/")
-        else:
-            continue
+        owner, repo = _split_repo_path(repo_string)
 
         last_seen_id = int(cursors.get(repo_string, 0))
         high_water_mark = last_seen_id
@@ -169,9 +166,7 @@ def crawl_pr_reviews(target_repos: list, months_back: int = 2, status_callback=N
     time_ago = (datetime.utcnow() - timedelta(days=months_back * 30)).isoformat() + "Z"
 
     for repo_string in target_repos:
-        if "/" not in repo_string:
-            continue
-        owner, repo = repo_string.split("/")
+        owner, repo = _split_repo_path(repo_string)
 
         last_seen_pr = int(cursors.get(f"{repo_string}_reviews", 0))
         high_water_mark = last_seen_pr
@@ -269,6 +264,30 @@ ISSUE_CONTEXT_MAX_CHARS = 2000
 ISSUE_COMMENT_MIN_LENGTH = 40
 
 
+class InvalidRepoPathError(ValueError):
+    """Raised when a configured repo is not in GitHub's owner/repo form."""
+
+
+def _split_repo_path(repo_string: str) -> tuple[str, str]:
+    """Split "owner/repo" into its parts, or raise InvalidRepoPathError.
+
+    Previously each crawler did `if "/" in repo_string: ... else: continue`, so a
+    repo registered without its owner was skipped in silence: the job completed
+    in seconds having crawled nothing, the LLM was handed zero comments, and no
+    error appeared in the logs or the UI. That is indistinguishable from a repo
+    that genuinely has no review comments, which makes it expensive to diagnose.
+    """
+    cleaned = (repo_string or "").strip()
+    parts = cleaned.split("/")
+    if len(parts) != 2 or not all(parts):
+        raise InvalidRepoPathError(
+            f"Repository {repo_string!r} is not a valid GitHub path. "
+            f"Use owner/repo (for example tucowsinc/tdp-components), "
+            f"not a bare name or a full URL."
+        )
+    return parts[0], parts[1]
+
+
 def _is_bot_comment(comment: dict) -> bool:
     login = (comment.get("user") or {}).get("login", "").lower()
     return login in BOT_NAMES or "[bot]" in login
@@ -364,10 +383,7 @@ def crawl_closed_issues(
     time_ago = (datetime.utcnow() - timedelta(days=months_back * 30)).isoformat() + "Z"
 
     for repo_string in target_repos:
-        if "/" not in repo_string:
-            continue
-
-        owner, repo = repo_string.split("/")
+        owner, repo = _split_repo_path(repo_string)
         cursor_key = f"{repo_string}_issues"
 
         last_seen_issue = int(cursors.get(cursor_key, 0))

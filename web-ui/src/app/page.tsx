@@ -378,20 +378,60 @@ export default function Home() {
     }
   };
 
+  /** POST only the fields ConfigUpdate accepts.
+   *
+   *  The backend sets extra="forbid", so posting the whole config object — which
+   *  carries read-only fields like env_overrides and webhook_url — is rejected
+   *  with HTTP 422. Every repo handler used to do exactly that, so adding a repo
+   *  updated the dropdown, closed the dialog, and saved nothing: a later job then
+   *  ran against a repo the backend had never heard of.
+   */
+  const persistConfig = async (next: any): Promise<boolean> => {
+    const payload = {
+      github_token: next.github_token,
+      huggingface_token: next.huggingface_token,
+      github_webhook_secret: next.github_webhook_secret,
+      llm_models: next.llm_models || [],
+      llm_models_active: next.llm_models_active || [],
+      provider_api_keys: next.provider_api_keys || {},
+      embedding_model: next.embedding_model,
+      repos: next.repos || {},
+    };
+    const res = await apiFetch(`/api/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      setConfigError(`Save failed (HTTP ${res.status}). ${detail.slice(0, 300)}`);
+      return false;
+    }
+    setConfigError("");
+    return true;
+  };
+
   const handleAddRepoSubmit = async (e: any) => {
     e.preventDefault();
     const repoPath = newRepoString.trim();
-    if (repoPath) {
-      const updatedRepos = { ...config.repos, [repoPath]: { months: 2, threshold: 0.45 } };
-      const updatedConfig = { ...config, repos: updatedRepos };
-      setConfig(updatedConfig);
-      setSelectedRepo(repoPath);
-      setMonths(2);
-      setThreshold(0.45);
-      setNewRepoString("");
-      setShowAddRepo(false);
-      await apiFetch(`/api/config`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updatedConfig) });
+    if (!repoPath) return;
+    // GitHub needs owner/repo. deep_crawler skips any entry without a slash, so a
+    // bare name yields a silent zero-result run rather than an error.
+    if (!/^[^/\s]+\/[^/\s]+$/.test(repoPath)) {
+      setConfigError(
+        `"${repoPath}" is not a full repository path. Use owner/repo — e.g. tucowsinc/${repoPath.replace(/^.*\//, "")}.`
+      );
+      return;
     }
+    const updatedRepos = { ...config.repos, [repoPath]: { months: 2, threshold: 0.45 } };
+    const updatedConfig = { ...config, repos: updatedRepos };
+    if (!(await persistConfig(updatedConfig))) return;
+    setConfig(updatedConfig);
+    setSelectedRepo(repoPath);
+    setMonths(2);
+    setThreshold(0.45);
+    setNewRepoString("");
+    setShowAddRepo(false);
   };
 
   const handleDeleteRepo = async (repoToDelete: string) => {
@@ -399,6 +439,10 @@ export default function Home() {
       const updatedRepos = { ...config.repos };
       delete updatedRepos[repoToDelete];
       const updatedConfig = { ...config, repos: updatedRepos };
+
+      // Persist before mutating local state, so a rejected save leaves the UI
+      // showing what the backend actually has.
+      if (!(await persistConfig(updatedConfig))) return;
       setConfig(updatedConfig);
 
       const keys = Object.keys(updatedRepos);
@@ -409,7 +453,6 @@ export default function Home() {
       } else {
         setSelectedRepo("");
       }
-      await apiFetch(`/api/config`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updatedConfig) });
     }
   };
 
@@ -419,8 +462,8 @@ export default function Home() {
       ...config,
       repos: { ...config.repos, [selectedRepo]: { months, threshold } }
     };
+    if (!(await persistConfig(updatedConfig))) return;
     setConfig(updatedConfig);
-    await apiFetch(`/api/config`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updatedConfig) });
   };
 
   const handleStartJob = async (e: any) => {

@@ -505,7 +505,12 @@ def update_config(payload: ConfigUpdate):
                 ),
             )
 
-    return conf_manager.save_config(data)
+    # Redact before returning. save_config returns the merged plaintext config,
+    # and echoing it verbatim meant every Settings or repo save sent the stored
+    # GitHub token, HF token and provider keys back to the browser — where they
+    # reach devtools and any logging proxy. GET has always redacted; POST must
+    # agree, or the same field is safe to read and unsafe to write.
+    return _redact_sensitive_fields(conf_manager.save_config(data))
 
 @app.get("/api/cache/{repo:path}")
 def get_cache_info(repo: str):
